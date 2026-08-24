@@ -1,0 +1,3 @@
+# Team overrides for bmad-spec. Committed to the repo — applies to every developer.
+[workflow]
+spec_output_path = "{project-root}/docs/planning/specs"
