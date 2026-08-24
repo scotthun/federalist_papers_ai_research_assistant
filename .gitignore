@@ -22,3 +22,14 @@ lerna-debug.log*
 # temp directory
 .temp
 .tmp
+
+# AI tooling (local-only, not part of the shipped project)
+.claude/
+_bmad-output/
+
+# _bmad/ is tool-vendored, except the team-shared override file BMAD itself
+# expects to be committed (see _bmad/custom/.gitignore)
+_bmad/*
+!_bmad/custom
+_bmad/custom/*
+!_bmad/custom/config.toml
