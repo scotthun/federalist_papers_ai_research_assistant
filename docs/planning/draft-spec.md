@@ -226,6 +226,8 @@ where options can include:
 
 Do not implement advanced reranking unless it provides clear value and can be implemented simply.
 
+**Implementation note:** `paperNumber`/`author` filters must be pushed into the SQL `WHERE` clause *before* the `ORDER BY <-> LIMIT topK` cutoff, not applied after. Filtering post-hoc on an unfiltered top-K result silently drops matching chunks that existed outside that top K.
+
 ## ANSWER GENERATION
 
 The LLM should receive:
@@ -522,6 +524,13 @@ Do not allow the LLM to generate arbitrary SQL for execution.
 The LLM should only interact with explicitly defined application capabilities.
 
 If natural-language database querying is eventually added, use a constrained query interface or validated query generation rather than blindly executing generated SQL.
+
+### COST EXPOSURE / RATE LIMITING DECISION (locked, 2026-08-24)
+
+Principle 8 rules out authentication, but the ask endpoint calls a paid or free-tier-metered AI provider (OpenRouter or a free Google Gemini key — provider undecided, doesn't change this design) with no per-user identity to gate on. Two limits, not one, since they defend against different things:
+
+1. **Per-IP throttle (MVP, required)** — a light request-per-minute cap via `@nestjs/throttler`, in-memory storage, no new infrastructure. Defends against a single client hammering the endpoint and degrading it for everyone else. A per-*second* cap alone was considered and rejected: it stops a burst but not a slow, sustained drain (a client staying just under a per-second limit can still run up thousands of requests over a day).
+2. **Global daily cap (deferred past MVP, documented now so the design isn't lost)** — a hard ceiling on total AI-backed requests per day across all callers, the piece that actually bounds worst-case cost/quota exposure. Implementation, when built: **no Redis needed** — a single process doesn't need a shared external store; an in-memory counter with a daily reset (or the same `@nestjs/throttler` package, pointed at a fixed key instead of the caller's IP so it counts globally) is sufficient. Redis would only earn its place if this app ever ran as multiple server processes needing to share one counter, which is out of scope here.
 
 ## OBSERVABILITY
 
