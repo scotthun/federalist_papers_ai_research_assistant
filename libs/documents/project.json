@@ -1,0 +1,9 @@
+{
+  "name": "documents",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/documents/src",
+  "projectType": "library",
+  "tags": ["scope:documents"],
+  "// targets": "to see all targets run: nx show project documents --web",
+  "targets": {}
+}
