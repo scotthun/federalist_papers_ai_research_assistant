@@ -117,4 +117,19 @@ describe('parseAvalonPaper', () => {
       "Content that would be lost if the marker weren't scoped to paper 70.",
     );
   });
+
+  it.each(Array.from({ length: 85 }, (_, i) => i + 1))(
+    'parses paper No. %i from a live-fetched fixture without throwing',
+    (paperNumber) => {
+      const html = fixture(`fed${String(paperNumber).padStart(2, '0')}.html`);
+      const result = parseAvalonPaper(html, paperNumber);
+      expect(result.paperNumber).toBe(paperNumber);
+      expect(result.title.length).toBeGreaterThan(0);
+      expect(result.authors.length).toBeGreaterThan(0);
+      expect(result.authors.every((a) => ['Hamilton', 'Madison', 'Jay'].includes(a))).toBe(true);
+      expect(result.fullText.length).toBeGreaterThan(0);
+      expect(result.fullText).not.toMatch(/Return to the Text/);
+      expect(result.fullText).not.toMatch(/Next Document|Avalon Home/);
+    },
+  );
 });
