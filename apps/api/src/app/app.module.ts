@@ -1,24 +1,20 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { createDataSourceOptions } from '@federalist-research/database';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { validateEnv } from './env.validation';
 
 @Module({
   imports: [
-    // No entities exist yet (schema/migrations land in Story 1.2) — this
-    // module's only job right now is to prove apps/api can reach the
-    // Compose Postgres instance via DATABASE_URL, with no hardcoded
-    // connection values (AD-5) and a fail-fast error if it's missing/invalid.
+    // Entities/migrations wiring is shared with the standalone migrate/ingest Nx targets (see
+    // libs/database's data-source.ts) so the running app and the migration runner can never
+    // drift on what schema exists. Connection target comes from DATABASE_URL at runtime (AD-5)
+    // -- never hardcoded -- with a fail-fast error if it's missing/invalid.
     TypeOrmModule.forRootAsync({
       useFactory: () => {
         const { DATABASE_URL } = validateEnv();
-        return {
-          type: 'postgres',
-          url: DATABASE_URL,
-          entities: [],
-          synchronize: false,
-        };
+        return createDataSourceOptions(DATABASE_URL);
       },
     }),
   ],

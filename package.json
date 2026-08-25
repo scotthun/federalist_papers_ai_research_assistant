@@ -6,14 +6,16 @@
     "node": "24.15.0"
   },
   "scripts": {
-    "dev": "nx run-many --target=serve --projects=api,web --parallel"
+    "dev": "nx run-many --target=serve --projects=api,web --parallel",
+    "db:migrate": "nx run api:migrate",
+    "ingest:federalist-papers": "nx run api:ingest",
+    "test:db-integration": "DATABASE_URL=postgres://federalist:federalist@localhost:5432/federalist_research nx run database:test --skip-nx-cache"
   },
   "private": true,
   "devDependencies": {
     "@eslint/js": "^9.8.0",
     "@nestjs/schematics": "^11.0.0",
     "@nestjs/testing": "11.2.1",
-    "@types/pg": "8.23.0",
     "@nx/eslint": "23.1.1",
     "@nx/eslint-plugin": "23.1.1",
     "@nx/jest": "23.1.1",
@@ -32,6 +34,7 @@
     "@testing-library/react": "16.3.0",
     "@types/jest": "~30.0.0",
     "@types/node": "^22.0.0",
+    "@types/pg": "8.23.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "babel-jest": "~30.3.0",
@@ -53,10 +56,12 @@
     "webpack-dev-server": "^5.2.1"
   },
   "dependencies": {
+    "@google/genai": "2.18.0",
     "@nestjs/common": "11.2.1",
     "@nestjs/core": "11.2.1",
     "@nestjs/platform-express": "11.2.1",
     "@nestjs/typeorm": "11.0.3",
+    "cheerio": "1.2.0",
     "next": "16.3.2",
     "pg": "8.23.0",
     "react": "^19.0.0",

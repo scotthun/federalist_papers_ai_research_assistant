@@ -1,1 +1,2 @@
-export * from './lib/documents';
+export * from './lib/avalon-parser';
+export * from './lib/chunker';

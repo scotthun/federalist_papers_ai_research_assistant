@@ -45,6 +45,18 @@ export default [
               sourceTag: 'scope:shared',
               onlyDependOnLibsWithTags: ['scope:shared'],
             },
+            // apps/api is the thin orchestrator that composes documents + ai + database for
+            // ingestion (Story 1.2) -- it never contains business logic itself, only wiring.
+            {
+              sourceTag: 'scope:api',
+              onlyDependOnLibsWithTags: [
+                'scope:api',
+                'scope:database',
+                'scope:ai',
+                'scope:documents',
+                'scope:shared',
+              ],
+            },
           ],
         },
       ],
