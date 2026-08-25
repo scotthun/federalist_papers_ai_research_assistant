@@ -23,6 +23,42 @@ lerna-debug.log*
 .temp
 .tmp
 
+# Nx monorepo
+out-tsc
+.nx/cache
+.nx/workspace-data
+.nx/migrate-runs
+
+# Next.js
+.next
+out
+
+# coverage
+/coverage
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# IDE - VSCode (allow the team-shared config files)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# System files
+.DS_Store
+Thumbs.db
+
+# throwaway Story 0.1 spike (never merged into main)
+/spike
+
 # AI tooling (local-only, not part of the shipped project)
 .claude/
 _bmad-output/

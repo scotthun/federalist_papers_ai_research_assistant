@@ -1,0 +1,26 @@
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    "rootDir": ".",
+    "sourceMap": true,
+    "declaration": false,
+    "moduleResolution": "bundler",
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "importHelpers": true,
+    "target": "es2015",
+    "module": "esnext",
+    "lib": ["es2020", "dom"],
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true,
+    "strict": false,
+    "paths": {
+      "@federalist-research/ai": ["./libs/ai/src/index.ts"],
+      "@federalist-research/database": ["./libs/database/src/index.ts"],
+      "@federalist-research/documents": ["./libs/documents/src/index.ts"],
+      "@federalist-research/retrieval": ["./libs/retrieval/src/index.ts"],
+      "@federalist-research/shared": ["./libs/shared/src/index.ts"]
+    }
+  },
+  "exclude": ["node_modules", "tmp"]
+}

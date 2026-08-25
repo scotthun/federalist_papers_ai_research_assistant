@@ -1,0 +1,9 @@
+{
+  "name": "retrieval",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/retrieval/src",
+  "projectType": "library",
+  "tags": ["scope:retrieval"],
+  "// targets": "to see all targets run: nx show project retrieval --web",
+  "targets": {}
+}

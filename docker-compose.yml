@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-federalist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-federalist}
+      POSTGRES_DB: ${POSTGRES_DB:-federalist_research}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - federalist-db-data:/var/lib/postgresql
+
+volumes:
+  federalist-db-data:
