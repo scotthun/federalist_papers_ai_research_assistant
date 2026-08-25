@@ -1,0 +1,18 @@
+[
+  {
+    "question": "What does Federalist No. 10 say about factions?",
+    "expectedPapers": [10]
+  },
+  {
+    "question": "How does Federalist No. 51 describe checks and balances between government departments?",
+    "expectedPapers": [51]
+  },
+  {
+    "question": "What is the general introduction to the Federalist Papers about?",
+    "expectedPapers": [1]
+  },
+  {
+    "question": "Why would government be unnecessary if men were angels?",
+    "expectedPapers": [51]
+  }
+]
