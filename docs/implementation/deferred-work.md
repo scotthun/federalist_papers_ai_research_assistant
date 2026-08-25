@@ -5,3 +5,15 @@
 - source_spec: `docs/implementation/spec-1-1-nx-monorepo-setup.md`
   summary: No automated (CI) check verifies Nx workspace-config target wiring, e.g. the `nx.json` `devTargetName: 'serve'` remap that makes `npm run dev` work for `apps/web`.
   evidence: This repo has no CI at all yet (no `.github` workflow, no other CI config). `nx run-many -t lint` / `-t test` don't exercise the `serve`/`dev` target mapping, so a future accidental removal of `devTargetName: 'serve'` would silently break `npm run dev` for `web` with no automated signal. Worth a lightweight check (e.g. `nx show project web --json` asserting a `serve` target exists) once CI is introduced — not this story's job to introduce CI itself.
+
+- source_spec: `docs/implementation/spec-1-2-federalist-ingestion-pipeline.md`
+  summary: `federalist_paper_authors` join table has no secondary index on `author_id` (only the composite PK `(paper_id, author_id)`), so the reverse `Author.papers` lookup direction isn't index-backed.
+  evidence: Not needed by this story (ingestion only ever writes/looks up by `paperNumber`), but Epic 2 (search by author) will query the reverse direction. Cheap to add in a follow-up migration once that story starts.
+
+- source_spec: `docs/implementation/spec-1-2-federalist-ingestion-pipeline.md`
+  summary: The `ingest`/`migrate` one-off scripts have no graceful shutdown handling (SIGINT/SIGTERM) — `dataSource.destroy()` only runs via a `finally` block, so killing a long-running ingestion mid-run leaves the DB connection in an undefined state rather than closing cleanly.
+  evidence: Real but low-value for a local one-off script (not a long-running server); worth revisiting if ingestion ever runs unattended/in CI where clean cancellation matters more.
+
+- source_spec: `docs/implementation/spec-1-2-federalist-ingestion-pipeline.md`
+  summary: `chunker.ts`'s `wordsOf('')` returns `['']` (one empty string) rather than `[]`, and overlap continuity is lost immediately after an oversized-paragraph hard-split fallback.
+  evidence: Both are real per the code, but currently unreachable/unhit in practice — `wordsOf('')` is always called on already-guarded non-empty input, and none of the real 85 papers' paragraphs exceeded `maxWords` (1000 words) to trigger the oversized-paragraph fallback. Latent footguns worth fixing if `chunker.ts` is ever reused with different inputs/options.

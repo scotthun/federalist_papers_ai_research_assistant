@@ -3,7 +3,7 @@
   "$schema": "../../node_modules/nx/schemas/project-schema.json",
   "sourceRoot": "apps/api/src",
   "projectType": "application",
-  "tags": [],
+  "tags": ["scope:api"],
   "targets": {
     "build": {
       "executor": "nx:run-commands",
@@ -63,6 +63,38 @@
         "production": {
           "buildTarget": "api:build:production"
         }
+      }
+    },
+    "build-migrate": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "webpack-cli build --config webpack.migrate.config.js",
+        "cwd": "apps/api"
+      }
+    },
+    "migrate": {
+      "dependsOn": ["build-migrate"],
+      "cache": false,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node dist/apps/api-migrate/main.js"
+      }
+    },
+    "build-ingest": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "webpack-cli build --config webpack.ingest.config.js",
+        "cwd": "apps/api"
+      }
+    },
+    "ingest": {
+      "dependsOn": ["build-ingest"],
+      "cache": false,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node --use-system-ca dist/apps/api-ingest/main.js"
       }
     },
     "test": {
