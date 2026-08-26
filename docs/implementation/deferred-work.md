@@ -33,3 +33,19 @@
 - source_spec: `docs/implementation/spec-1-4-read-a-paper.md`
   summary: `paper-detail.repository.integration.spec.ts`'s `cleanUp` doesn't pre-assert the reserved test paper numbers are clean before the test body runs.
   evidence: Minor test-hygiene gap — if a previous run were killed mid-way, a stale row could cause a confusing failure instead of a clear "dirty fixture" signal. Low value to fix proactively without evidence this has actually happened.
+
+- source_spec: `docs/implementation/spec-2-1-search-by-metadata.md`
+  summary: `QuickFindSearch` never prefills from the current `?q=` — returning to `/?q=Madison` (browser back, a shared link, or the Reader page's own "Back to results for 'Madison'" link) renders an empty search box even though a search is active.
+  evidence: Real gap, but the spec's own Design Notes explicitly call this out as a deliberate simplification ("QuickFindSearch takes no props today") — adding a prefill would mean either a prop (against that design note) or `useSearchParams()` (a Suspense-boundary complication) for a cosmetic benefit. Revisit only if the spec's no-props stance is deliberately renegotiated.
+
+- source_spec: `docs/implementation/spec-2-1-search-by-metadata.md`
+  summary: A search term containing an apostrophe garbles the single-quote-wrapped label text, e.g. `Search results for 'O'Brien'`.
+  evidence: Real but cosmetic, and no real Federalist Papers author name contains an apostrophe (Hamilton, Madison, Jay) — low value to fix proactively for an input that can't occur against this corpus's actual data.
+
+- source_spec: `docs/implementation/spec-2-1-search-by-metadata.md`
+  summary: A purely numeric query (e.g. a year like "1787") that doesn't match any real `paperNumber` never falls back to keyword search against title/full text, even though the number might appear as a keyword in a paper's body; a negative number (e.g. "-5") behaves the same way.
+  evidence: Matches the spec's own boundary verbatim ("If the query is a plain decimal integer... search by exact paperNumber match") — the number-path is exclusive by design, not a bug introduced by this story's implementation. Revisit only if the spec's search-mode boundary is deliberately renegotiated to add a keyword fallback.
+
+- source_spec: `docs/implementation/spec-2-1-search-by-metadata.md`
+  summary: `findByKeyword` performs two full round trips to Postgres per keyword search (one `getRawMany` for matching ids, then a second `find` by `In(ids)` to rehydrate authors) where a single query could suffice.
+  evidence: Deliberate tradeoff, not an oversight — a single query with the match condition folded into the same `WHERE` would silently drop non-matching co-authors from the hydrated `authors` relation (the exact joint-authorship bug this story's boundaries exist to prevent). Harmless at the real 85-paper corpus; revisit only if this repository's scale changes enough for two round trips per search to matter.

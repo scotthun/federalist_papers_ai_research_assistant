@@ -5,10 +5,10 @@ import { PapersService } from './papers.service';
 
 describe('PapersController', () => {
   let controller: PapersController;
-  let service: { findAll: jest.Mock; findOne: jest.Mock };
+  let service: { findAll: jest.Mock; findOne: jest.Mock; search: jest.Mock };
 
   beforeEach(async () => {
-    service = { findAll: jest.fn(), findOne: jest.fn() };
+    service = { findAll: jest.fn(), findOne: jest.fn(), search: jest.fn() };
 
     const app: TestingModule = await Test.createTestingModule({
       controllers: [PapersController],
@@ -24,6 +24,29 @@ describe('PapersController', () => {
 
     await expect(controller.findAll()).resolves.toEqual(papers);
     expect(service.findAll).toHaveBeenCalledTimes(1);
+  });
+
+  describe('search', () => {
+    it('delegates to PapersService.search with the raw query and returns its result', async () => {
+      const papers = [{ paperNumber: 51, title: 'The Structure of the Government', authors: ['Hamilton'] }];
+      service.search.mockResolvedValue(papers);
+
+      await expect(controller.search('Hamilton')).resolves.toEqual(papers);
+      expect(service.search).toHaveBeenCalledWith('Hamilton');
+    });
+
+    it('passes an empty string to PapersService.search when q is absent', async () => {
+      service.search.mockResolvedValue([]);
+
+      await expect(controller.search(undefined)).resolves.toEqual([]);
+      expect(service.search).toHaveBeenCalledWith('');
+    });
+
+    it('returns an empty array when the service finds no matches', async () => {
+      service.search.mockResolvedValue([]);
+
+      await expect(controller.search('zzznonsensezzz')).resolves.toEqual([]);
+    });
   });
 
   describe('findOne', () => {

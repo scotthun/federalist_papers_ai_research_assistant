@@ -31,6 +31,25 @@ function createServiceForDetail(row: unknown): PapersService {
   return new PapersService(dataSource);
 }
 
+/**
+ * Fakes only the DataSource boundary -- searchPapers itself (the ILIKE/number-match query, real
+ * joint-authorship joins, real dedup) is exercised for real, against real Postgres, by
+ * libs/database's paper-search.repository.integration.spec.ts. This test covers only the mapping
+ * from that repository's row shape to the PaperSummary response contract, same as findAll's.
+ *
+ * Callers exercise the plain-integer branch of the real (unmocked) searchPapers function --
+ * repository.find is called directly with no join/ILIKE query needed -- so only `find` needs a
+ * fake implementation here.
+ */
+function createServiceForSearch(rows: unknown[]): PapersService {
+  const dataSource = {
+    getRepository: jest.fn().mockReturnValue({
+      find: jest.fn().mockResolvedValue(rows),
+    }),
+  } as unknown as DataSource;
+  return new PapersService(dataSource);
+}
+
 describe('PapersService', () => {
   it('maps repository rows into the PaperSummary shape', async () => {
     const service = createService([
@@ -99,6 +118,38 @@ describe('PapersService', () => {
       const service = createServiceForDetail(null);
 
       await expect(service.findOne(999)).resolves.toBeNull();
+    });
+  });
+
+  describe('search', () => {
+    it('maps repository rows into the PaperSummary shape', async () => {
+      const service = createServiceForSearch([
+        { paperNumber: 51, title: 'The Structure of the Government', authors: [{ name: 'Hamilton' }] },
+      ]);
+
+      await expect(service.search('51')).resolves.toEqual([
+        { paperNumber: 51, title: 'The Structure of the Government', authors: ['Hamilton'] },
+      ]);
+    });
+
+    it('includes every credited author for a jointly-authored paper', async () => {
+      const service = createServiceForSearch([
+        {
+          paperNumber: 18,
+          title: 'The Utility of the Union as a Safeguard Against Domestic Faction and Insurrection',
+          authors: [{ name: 'Hamilton' }, { name: 'Madison' }],
+        },
+      ]);
+
+      const result = await service.search('18');
+
+      expect(result[0].authors).toEqual(['Hamilton', 'Madison']);
+    });
+
+    it('returns an empty array when there are no matches', async () => {
+      const service = createServiceForSearch([]);
+
+      await expect(service.search('999999')).resolves.toEqual([]);
     });
   });
 });

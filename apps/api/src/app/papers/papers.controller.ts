@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Param } from '@nestjs/common';
+import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
 import {
   PaperDetail,
   PaperSummary,
@@ -7,9 +7,9 @@ import {
 import { PapersService } from './papers.service';
 
 /**
- * `GET /api/papers` and `GET /api/papers/:paperNumber` (global prefix set in main.ts). `apps/web`
- * is this controller's only consumer, over HTTP only (Structural Seed) -- it never reaches
- * `libs/database` directly.
+ * `GET /api/papers`, `GET /api/papers/search`, and `GET /api/papers/:paperNumber` (global prefix
+ * set in main.ts). `apps/web` is this controller's only consumer, over HTTP only (Structural
+ * Seed) -- it never reaches `libs/database` directly.
  */
 @Controller('papers')
 export class PapersController {
@@ -19,6 +19,28 @@ export class PapersController {
   @Get()
   findAll(): Promise<PaperSummary[]> {
     return this.papersService.findAll();
+  }
+
+  /**
+   * "Quick find" search by paper number, author, title, or keyword (Story 2.1) -- a direct
+   * relational query against `libs/database`, never `libs/retrieval`. Declared *before*
+   * `findOne`'s `@Get(':paperNumber')` below: Nest/Express matches routes in registration order,
+   * and an unordered `:paperNumber` route would otherwise swallow `/papers/search` as though
+   * "search" were itself a paperNumber (and 404, since it's non-numeric) before this handler ever
+   * ran. A missing/blank `q` returns an empty array -- this endpoint only searches; deciding that
+   * "no search term" means "show the unfiltered list instead" is `apps/web`'s page-level concern,
+   * which is why it never calls this endpoint with a blank `q` in the first place.
+   *
+   * A repeated `?q=a&q=b` resolves `q` to `string[]` (Nest/Express's normal behavior for a
+   * repeated query param) -- only the first value is ever meaningful, same normalization
+   * `apps/web/src/app/page.tsx` already applies to its own `searchParams.q`. Without this, the
+   * array would reach `searchPapers`'s `query.trim()` unchanged and throw (`TypeError: query.trim
+   * is not a function`), producing an unhandled 500 instead of a clean 200.
+   */
+  @Get('search')
+  search(@Query('q') q?: string | string[]): Promise<PaperSummary[]> {
+    const query = Array.isArray(q) ? q[0] ?? '' : q ?? '';
+    return this.papersService.search(query);
   }
 
   /**

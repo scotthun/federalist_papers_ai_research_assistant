@@ -33,6 +33,10 @@ function paramsFor(paperNumber: string) {
   return Promise.resolve({ paperNumber });
 }
 
+function searchParamsFor(q: string | string[]) {
+  return Promise.resolve({ q });
+}
+
 describe('Paper Reader page', () => {
   afterEach(() => {
     global.fetch = originalFetch;
@@ -250,6 +254,84 @@ describe('Paper Reader page', () => {
     render(await Page({ params: paramsFor('1') }));
 
     expect(screen.getByRole('alert')).toBeTruthy();
+  });
+
+  it('renders the generic "← Browse Papers" back-link to "/" when there is no search context', async () => {
+    const paper: PaperDetail = {
+      paperNumber: 1,
+      title: 'General Introduction',
+      authors: ['Hamilton'],
+      fullText: 'Text.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed01.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    render(await Page({ params: paramsFor('1') }));
+
+    const backLink = screen.getByRole('link', { name: '← Browse Papers' });
+    expect(backLink.getAttribute('href')).toBe('/');
+  });
+
+  it("renders a context-aware \"← Back to results for '<term>'\" back-link when reached from a search", async () => {
+    const paper: PaperDetail = {
+      paperNumber: 51,
+      title: 'The Structure of the Government Must Furnish the Proper Checks and Balances',
+      authors: ['Hamilton', 'Madison'],
+      fullText: 'Text.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed51.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    render(
+      await Page({
+        params: paramsFor('51'),
+        searchParams: searchParamsFor('Madison'),
+      }),
+    );
+
+    const backLink = screen.getByRole('link', { name: "← Back to results for 'Madison'" });
+    expect(backLink.getAttribute('href')).toBe('/?q=Madison');
+    expect(screen.queryByRole('link', { name: '← Browse Papers' })).toBeNull();
+  });
+
+  it('treats a whitespace-only q the same as an absent one (generic back-link)', async () => {
+    const paper: PaperDetail = {
+      paperNumber: 1,
+      title: 'General Introduction',
+      authors: ['Hamilton'],
+      fullText: 'Text.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed01.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    render(
+      await Page({ params: paramsFor('1'), searchParams: searchParamsFor('   ') }),
+    );
+
+    expect(screen.getByRole('link', { name: '← Browse Papers' })).toBeTruthy();
+  });
+
+  it('URL-encodes the search term in the back-link href', async () => {
+    const paper: PaperDetail = {
+      paperNumber: 1,
+      title: 'General Introduction',
+      authors: ['Hamilton'],
+      fullText: 'Text.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed01.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    render(
+      await Page({
+        params: paramsFor('1'),
+        searchParams: searchParamsFor('checks & balances'),
+      }),
+    );
+
+    const backLink = screen.getByRole('link', {
+      name: "← Back to results for 'checks & balances'",
+    });
+    expect(backLink.getAttribute('href')).toBe('/?q=checks%20%26%20balances');
   });
 
   it('renders a clear error state when paperNumber is NaN', async () => {
