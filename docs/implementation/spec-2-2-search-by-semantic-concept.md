@@ -2,7 +2,7 @@
 title: 'Story 2.2: Search by Semantic Concept'
 type: 'feature'
 created: '2026-08-26'
-status: 'approved'
+status: 'done'
 review_loop_iteration: 0
 context: []
 baseline_commit: '7c369cb46084fb1f0dd739b4d79acd264740fff1'
@@ -79,6 +79,8 @@ baseline_commit: '7c369cb46084fb1f0dd739b4d79acd264740fff1'
 
 ## Spec Change Log
 
+- 2026-08-26 -- Code review patch round (7 findings across 3 independent reviewers, all fixed, no spec-intent change): (1) `runEval` had no per-case error handling -- one rejected retrieval aborted the whole run and discarded every other question's result; fixed with a per-case try/catch (mirroring `ingest.ts`'s `runIngestion` continue-past-failure convention), recording a failed case as a miss with its error captured, verified by a test where one case rejects and a later case still succeeds. (2) The eval script made one real embedding call per question with no delay, unlike `ingest.ts`'s `INGEST_EMBED_DELAY_MS` precaution against Gemini's rate limit -- fixed with an `EVAL_EMBED_DELAY_MS`-configurable delay (default 250ms) before every real call after the first. (3) **The most important finding**: 6 of the hand-built eval dataset's 8 questions named the target paper directly in the question text ("What does Federalist No. 10 say...") -- this tested keyword matching, not the semantic/conceptual retrieval this story exists to prove. Rewritten so every question describes the concept/argument in plain language with no paper number anywhere in the text -- re-verified with a real run against live Gemini embeddings and the real corpus: all 8 questions found their expected paper in the top-5 (see Verification below for the actual scores/results). (4) No upper bound on `topK` (`?topK=999999` reached the SQL `LIMIT` unbounded) -- fixed with a clamp at 50. (5) Malformed `paperNumber` had no test (only `topK`'s malformed-value coverage existed) -- added the missing case. (6) `ORDER BY` had no deterministic tiebreaker for equal-similarity ties -- added `chunk.id` as a secondary sort key, confirmed it doesn't disturb the halfvec/HNSW index match. (7) `RetrievedChunk.score`'s doc comment didn't state it can be negative (`1 - cosine_distance`, not a bounded `[0,1]` confidence value) -- doc comment corrected, pinned with a test. Six additional lower-value findings (pgvector HNSW approximate-search correctness under filters at real-corpus scale, no configurable/persisted eval tooling for future threshold sweeps, no embedding-shape validation, no rate limiting on the new endpoint until Epic 4, the lazy AI-provider wrapper's memoization being race-safe only because `createAIProvider()` is currently synchronous, no call timeouts) were deferred rather than patched -- logged to `docs/implementation/deferred-work.md`. Re-verified after all fixes: full `nx run-many -t lint,test` and `npm run test:db-integration` both pass (19 retrieval-project DB-integration tests), plus the real `npm run eval:retrieval` run described above.
+
 ## Design Notes
 
 ## Verification
@@ -86,6 +88,48 @@ baseline_commit: '7c369cb46084fb1f0dd739b4d79acd264740fff1'
 **Commands:**
 - `curl "http://localhost:3333/api/papers/search/semantic?q=how+does+government+check+itself&topK=5"` -- expected: 5 chunks with descending similarity scores.
 - `curl "http://localhost:3333/api/papers/search/semantic?q=executive+power&paperNumber=70"` -- expected: only paper 70's chunks.
-- `npm run eval:retrieval` -- expected: every dataset question's expected paper appears in its top-K, exit 0.
+- `npm run eval:retrieval` -- expected: every dataset question's expected paper appears in its top-K, exit 0. **Actually run** against real Gemini embeddings and the real 85-paper corpus: all 8 questions hit, e.g. "Why would a government still need internal checks and balances between its branches even if the people running it were as virtuous as angels?" (no paper number named) correctly retrieved paper 51 first (score 0.7425); "Why does Publius argue for one strong president instead of a council or committee running the executive branch?" retrieved paper 70 (score 0.7648), one of the 11 valid targets. `EVAL PASSED: all 8 questions found an expected paper in the top-5`.
 - `nx run-many -t lint,test` -- expected: exit 0.
-- `npm run test:db-integration` -- expected: exit 0, including the new pgvector-ordering/filter-before-limit proof.
+- `npm run test:db-integration` -- expected: exit 0, including the new pgvector-ordering/filter-before-limit proof (19 tests in the `retrieval` project).
+
+## Suggested Review Order
+
+**Entry point**
+
+- `retrieveRelevantChunks` -- embeds the query, builds the parameterized pgvector query (score expression, optional filters, LIMIT), maps rows back to `RetrievedChunk[]`.
+  [`retrieval.ts:79`](../../libs/retrieval/src/lib/retrieval.ts#L79)
+
+**Correctness the story's Boundaries actually hinge on (filter-before-limit, HNSW index match)**
+
+- `COSINE_DISTANCE_EXPRESSION` -- casts to `halfvec(3072)` to match the HNSW index the migration built; getting this wrong wouldn't break correctness, only silently fall back to a full scan.
+  [`retrieval.ts:44`](../../libs/retrieval/src/lib/retrieval.ts#L44)
+
+- The `paperNumber`/`author` `WHERE` fragments, built into the *same* query as the `LIMIT` -- this is what makes filter-before-limit true by construction rather than by convention.
+  [`retrieval.ts:103`](../../libs/retrieval/src/lib/retrieval.ts#L103)
+
+- `retrieval.integration.spec.ts`'s load-bearing proof: decoy chunks pinned to cosine similarity 1.0 fill an unfiltered top-K, excluding a target pinned to similarity 0 -- then the same target *is* returned once filtered, proving the WHERE clause narrowed the candidate set before the LIMIT ran, not after.
+  [`retrieval.integration.spec.ts:241`](../../libs/retrieval/src/lib/retrieval.integration.spec.ts#L241)
+
+**The review-caught headline issue (a weak eval dataset)**
+
+- `retrieval-eval-dataset.json` -- rewritten after review caught 6 of 8 questions naming their target paper directly in the question text, which tested keyword matching instead of the semantic retrieval this story exists to prove.
+  [`retrieval-eval-dataset.json:1`](../../apps/api/src/retrieval-eval-dataset.json#L1)
+
+- `runEval`'s per-case try/catch and `withEmbedDelay` -- also review-caught: one failed question no longer aborts the whole run, and real embedding calls no longer fire back-to-back into Gemini's rate limit.
+  [`eval-retrieval.ts:71`](../../apps/api/src/eval-retrieval.ts#L71)
+
+**API wiring**
+
+- `PapersController.searchSemantic` / `parsePositiveIntQueryParam` -- strict, never-crashing query-param parsing; `topK` is clamped at 50 (also review-caught) rather than left unbounded.
+  [`papers.controller.ts:104`](../../apps/api/src/app/papers/papers.controller.ts#L104)
+
+- `createAIProviderProvider` -- a lazy, memoizing DI wrapper so a missing `GEMINI_API_KEY` only breaks `GET /api/papers/search/semantic`, never the whole `apps/api` server at boot.
+  [`ai-provider.provider.ts:27`](../../apps/api/src/app/papers/ai-provider.provider.ts#L27)
+
+**Peripherals**
+
+- `eslint.config.mjs` -- `scope:api` gains `scope:retrieval`, the first time `apps/api` is allowed to depend on it.
+  [`eslint.config.mjs:59`](../../eslint.config.mjs#L59)
+
+- `libs/database`'s `escapeLikeTerm`, exported so `libs/retrieval`'s `author` filter reuses Story 2.1's exact ILIKE-escaping convention instead of duplicating it.
+  [`paper-search.repository.ts:78`](../../libs/database/src/lib/paper-search.repository.ts#L78)
