@@ -62,6 +62,9 @@ function fakeAiProviderFor(queryToEmbedding: Record<string, number[]>): AIProvid
       }
       return embedding;
     },
+    generateStructuredOutput: async () => {
+      throw new Error('generateStructuredOutput is not used by retrieveRelevantChunks');
+    },
   };
 }
 
