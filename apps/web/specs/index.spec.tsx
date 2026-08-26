@@ -160,4 +160,128 @@ describe('Browse Papers page', () => {
 
     expect(screen.getByRole('alert')).toBeTruthy();
   });
+
+  it('renders the QuickFindSearch input', async () => {
+    mockFetchResolved({ ok: true, status: 200, body: [] });
+
+    render(await Page());
+
+    expect(
+      screen.getByLabelText('Search by number, author, title, or keyword'),
+    ).toBeTruthy();
+  });
+
+  function searchParamsFor(q: string | string[]) {
+    return Promise.resolve({ q });
+  }
+
+  describe('with a search query (?q=)', () => {
+    it('fetches from the search endpoint instead of the browse-all endpoint', async () => {
+      delete process.env.API_BASE_URL;
+      mockFetchResolved({ ok: true, status: 200, body: [] });
+
+      await Page({ searchParams: searchParamsFor('Madison') });
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://localhost:3333/api/papers/search?q=Madison',
+        expect.objectContaining({ cache: 'no-store' }),
+      );
+    });
+
+    it("shows a \"Search results for '<term>'\" heading and a way back to the unfiltered list", async () => {
+      mockFetchResolved({ ok: true, status: 200, body: [] });
+
+      render(await Page({ searchParams: searchParamsFor('Madison') }));
+
+      expect(
+        screen.getByRole('heading', { name: "Search results for 'Madison'" }),
+      ).toBeTruthy();
+      expect(
+        screen.getByRole('link', { name: /Back to all papers/ }).getAttribute('href'),
+      ).toBe('/');
+    });
+
+    it('carries the current ?q= forward on every result link', async () => {
+      const papers: PaperSummary[] = [
+        { paperNumber: 18, title: 'The Utility of the Union', authors: ['Hamilton', 'Madison'] },
+      ];
+      mockFetchResolved({ ok: true, status: 200, body: papers });
+
+      render(await Page({ searchParams: searchParamsFor('Madison') }));
+
+      expect(
+        screen.getByRole('link', { name: /The Utility of the Union/ }).getAttribute('href'),
+      ).toBe('/papers/18?q=Madison');
+    });
+
+    it('shows a clear "no matches" message, not an error, when the search finds nothing', async () => {
+      mockFetchResolved({ ok: true, status: 200, body: [] });
+
+      render(await Page({ searchParams: searchParamsFor('zzznonsensezzz') }));
+
+      expect(screen.getByText("No papers matched 'zzznonsensezzz'.")).toBeTruthy();
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('renders a clear error state, without crashing, when the search endpoint is unreachable', async () => {
+      global.fetch = jest
+        .fn()
+        .mockRejectedValue(new Error('network error')) as unknown as typeof fetch;
+
+      render(await Page({ searchParams: searchParamsFor('Madison') }));
+
+      expect(screen.getByRole('alert')).toBeTruthy();
+      // A real apps/api failure must never be described as "no results" -- that phrase means the
+      // search genuinely completed with zero matches, which isn't what happened here. The
+      // ApiUnreachableNotice alert above is the true state; the description must not contradict
+      // it by making a "no results" claim on top of it.
+      expect(screen.queryByText("No results for 'Madison'.")).toBeNull();
+      expect(screen.queryByText(/No results for/)).toBeNull();
+    });
+
+    it('URL-encodes the query term in both the fetch URL and result links', async () => {
+      delete process.env.API_BASE_URL;
+      const papers: PaperSummary[] = [
+        { paperNumber: 1, title: 'General Introduction', authors: ['Hamilton'] },
+      ];
+      mockFetchResolved({ ok: true, status: 200, body: papers });
+
+      render(await Page({ searchParams: searchParamsFor('checks & balances') }));
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://localhost:3333/api/papers/search?q=checks%20%26%20balances',
+        expect.anything(),
+      );
+      expect(
+        screen.getByRole('link', { name: /General Introduction/ }).getAttribute('href'),
+      ).toBe('/papers/1?q=checks%20%26%20balances');
+    });
+
+    it('uses only the first value when q is repeated in the URL', async () => {
+      delete process.env.API_BASE_URL;
+      mockFetchResolved({ ok: true, status: 200, body: [] });
+
+      await Page({ searchParams: searchParamsFor(['Madison', 'Hamilton']) });
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://localhost:3333/api/papers/search?q=Madison',
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('with an empty or whitespace-only ?q=', () => {
+    it('behaves exactly like Story 1.3 (fetches the unfiltered browse-all list), never "search for nothing"', async () => {
+      delete process.env.API_BASE_URL;
+      mockFetchResolved({ ok: true, status: 200, body: [] });
+
+      await Page({ searchParams: searchParamsFor('   ') });
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://localhost:3333/api/papers',
+        expect.objectContaining({ cache: 'no-store' }),
+      );
+      expect(screen.queryByRole('heading', { name: /Search results for/ })).toBeNull();
+    });
+  });
 });

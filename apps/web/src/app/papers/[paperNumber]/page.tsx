@@ -80,10 +80,16 @@ async function fetchPaperDetail(
   return { status: 'ok', paper: body };
 }
 
+/** Next.js App Router page-prop convention: `searchParams` is always a `Promise` (same as
+ * `params`). Defaulted so direct test invocations that omit it entirely (this page's
+ * pre-Story-2.1 tests) keep working unchanged -- Next itself always supplies a real value at
+ * request time, so the default never applies outside a test. */
 export default async function PaperReaderPage({
   params,
+  searchParams = Promise.resolve({}),
 }: {
   params: Promise<{ paperNumber: string }>;
+  searchParams?: Promise<{ q?: string | string[] }>;
 }) {
   const { paperNumber: rawPaperNumber } = await params;
   const paperNumber = parsePaperNumberRouteSegment(rawPaperNumber);
@@ -95,6 +101,17 @@ export default async function PaperReaderPage({
     notFound();
   }
 
+  const resolvedSearchParams = await searchParams;
+  const rawQuery = resolvedSearchParams.q;
+  const query = (Array.isArray(rawQuery) ? rawQuery[0] ?? '' : rawQuery ?? '').trim();
+  // When the reader was reached from a search result, the back-link should return to those
+  // results, not the generic unfiltered Browse Papers list (this story's Boundaries).
+  const hasSearchContext = query.length > 0;
+  const backLinkHref = hasSearchContext ? `/?q=${encodeURIComponent(query)}` : '/';
+  const backLinkLabel = hasSearchContext
+    ? `← Back to results for '${query}'`
+    : '← Browse Papers';
+
   const result = await fetchPaperDetail(paperNumber);
 
   if (result.status === 'not-found') {
@@ -104,10 +121,10 @@ export default async function PaperReaderPage({
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
       <Link
-        href="/"
+        href={backLinkHref}
         className="text-sm text-muted-foreground underline-offset-4 hover:underline"
       >
-        ← Browse Papers
+        {backLinkLabel}
       </Link>
 
       {result.status === 'error' ? (
