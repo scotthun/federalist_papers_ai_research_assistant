@@ -97,6 +97,22 @@
         "command": "node --use-system-ca dist/apps/api-ingest/main.js"
       }
     },
+    "build-eval-retrieval": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "webpack-cli build --config webpack.eval-retrieval.config.js",
+        "cwd": "apps/api"
+      }
+    },
+    "eval-retrieval": {
+      "dependsOn": ["build-eval-retrieval"],
+      "cache": false,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node dist/apps/api-eval-retrieval/main.js"
+      }
+    },
     "test": {
       "options": {
         "passWithNoTests": true
