@@ -17,3 +17,19 @@
 - source_spec: `docs/implementation/spec-1-2-federalist-ingestion-pipeline.md`
   summary: `chunker.ts`'s `wordsOf('')` returns `['']` (one empty string) rather than `[]`, and overlap continuity is lost immediately after an oversized-paragraph hard-split fallback.
   evidence: Both are real per the code, but currently unreachable/unhit in practice — `wordsOf('')` is always called on already-guarded non-empty input, and none of the real 85 papers' paragraphs exceeded `maxWords` (1000 words) to trigger the oversized-paragraph fallback. Latent footguns worth fixing if `chunker.ts` is ever reused with different inputs/options.
+
+- source_spec: `docs/implementation/spec-1-4-read-a-paper.md`
+  summary: The Paper Reader route (`/papers/[paperNumber]`) has no `loading.tsx` and no per-page `generateMetadata`/title — every paper's browser tab shows the same generic app title, and a slow `apps/api` response leaves no loading feedback during the server-side fetch.
+  evidence: Real gaps, not required by this story's AC (same call as Story 1.3's identical "no loading.tsx" finding). Worth adding once there's an actual perf/UX reason to prioritize it.
+
+- source_spec: `docs/implementation/spec-1-4-read-a-paper.md`
+  summary: No caching/revalidation strategy (`Cache-Control`, ETag, or Next.js ISR `revalidate`) for the Paper Reader page, even though ingested paper text is effectively immutable once stored.
+  evidence: Every page view currently triggers a fresh `apps/web` → `apps/api` → Postgres round trip for content that never changes. Not a correctness issue, premature to optimize before there's real traffic.
+
+- source_spec: `docs/implementation/spec-1-4-read-a-paper.md`
+  summary: No browser-level (e.g. Playwright) test verifies the *visual* "quiet" placement of the verification link that `decisions.md`/UX-DR9 call for — current tests only confirm the link's existence and `href` via jsdom.
+  evidence: Real gap, but this repo has no browser-test infrastructure at all yet; adding one is a much larger investment than this single finding justifies. Revisit if/when Playwright (or similar) is introduced for another reason.
+
+- source_spec: `docs/implementation/spec-1-4-read-a-paper.md`
+  summary: `paper-detail.repository.integration.spec.ts`'s `cleanUp` doesn't pre-assert the reserved test paper numbers are clean before the test body runs.
+  evidence: Minor test-hygiene gap — if a previous run were killed mid-way, a stale row could cause a confusing failure instead of a clear "dirty fixture" signal. Low value to fix proactively without evidence this has actually happened.

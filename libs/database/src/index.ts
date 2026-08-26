@@ -4,3 +4,4 @@ export * from './lib/entities/federalist-paper.entity';
 export * from './lib/data-source';
 export * from './lib/paper-ingestion.repository';
 export * from './lib/paper-browse.repository';
+export * from './lib/paper-detail.repository';
