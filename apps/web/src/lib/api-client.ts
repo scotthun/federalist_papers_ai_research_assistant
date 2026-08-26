@@ -15,6 +15,14 @@ const DEFAULT_API_BASE_URL = 'http://localhost:3333/api';
 // the same fetch-failure error path as any other failed request.
 export const API_FETCH_TIMEOUT_MS = 5_000;
 
+// POST /api/ask (Story 3.1) can involve a real LLM call -- and, on a citation-verification
+// miss or malformed output, a second one for the one allowed retry -- so it needs a much longer
+// timeout than the plain DB-read endpoints above use. Applied by
+// apps/web/src/app/api/ask/route.ts, the Next.js route handler that proxies a client-side
+// question to apps/api's real POST /api/ask (kept server-side so API_BASE_URL never has to become
+// a browser-exposed NEXT_PUBLIC_ value).
+export const ASK_FETCH_TIMEOUT_MS = 30_000;
+
 /**
  * Resolves apps/api's configured base URL, with any trailing slash(es) stripped so an
  * operator-supplied value ending in "/" (e.g. "http://localhost:3333/api/") doesn't produce a
