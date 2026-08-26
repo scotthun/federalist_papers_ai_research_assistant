@@ -27,7 +27,21 @@
     "types": [
       "jest",
       "node"
-    ]
+    ],
+    // TypeScript's `extends` replaces `compilerOptions.paths` wholesale rather than merging it
+    // with tsconfig.base.json's -- so every base alias is repeated here (translated to be
+    // relative to apps/web instead of the repo root) alongside the new local `@/*` one, so
+    // nothing from the base config is silently dropped. `scope:web`'s actual restriction to
+    // `scope:web`/`scope:shared` is enforced by eslint.config.mjs's depConstraints, not by this
+    // file -- keep this list in sync with tsconfig.base.json's `paths` if it ever changes.
+    "paths": {
+      "@/*": ["./src/*"],
+      "@federalist-research/ai": ["../../libs/ai/src/index.ts"],
+      "@federalist-research/database": ["../../libs/database/src/index.ts"],
+      "@federalist-research/documents": ["../../libs/documents/src/index.ts"],
+      "@federalist-research/retrieval": ["../../libs/retrieval/src/index.ts"],
+      "@federalist-research/shared": ["../../libs/shared/src/index.ts"]
+    }
   },
   "include": [
     "**/*.ts",
