@@ -13,7 +13,7 @@ import {
 } from '@federalist-research/retrieval';
 import { PaperDetail, PaperSummary } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
-import { AI_PROVIDER } from './ai-provider.provider';
+import { AI_PROVIDER } from '../ai-provider.provider';
 
 /**
  * Backs `GET /api/papers` (CAP-1, Browse Papers), `GET /api/papers/search` (Story 2.1, "Quick
