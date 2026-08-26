@@ -57,6 +57,12 @@ export default [
                 'scope:shared',
               ],
             },
+            // apps/web consumes apps/api over HTTP only (Structural Seed) -- it never imports
+            // backend libs directly, only the shared response-shape types (Story 1.3).
+            {
+              sourceTag: 'scope:web',
+              onlyDependOnLibsWithTags: ['scope:web', 'scope:shared'],
+            },
           ],
         },
       ],

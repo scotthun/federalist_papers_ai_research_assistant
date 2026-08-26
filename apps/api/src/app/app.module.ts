@@ -4,6 +4,7 @@ import { createDataSourceOptions } from '@federalist-research/database';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { validateEnv } from './env.validation';
+import { PapersModule } from './papers/papers.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { validateEnv } from './env.validation';
         return createDataSourceOptions(DATABASE_URL);
       },
     }),
+    PapersModule,
   ],
   controllers: [AppController],
   providers: [AppService],

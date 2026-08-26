@@ -23,7 +23,7 @@ Federalist Papers research assistant: Next.js frontend, NestJS backend, Postgres
 
 ## Known pitfalls
 
-- A project with no tag in its `project.json` is blocked from importing *any* other project, not just unlisted ones — Nx's default for untagged projects is total lockout, not lenience. `apps/web` currently has no tag; it will hit this the moment it needs to import from `libs/`, exactly like `apps/api` did in Story 1.2 before being tagged `scope:api`.
+- A project with no tag in its `project.json` is blocked from importing *any* other project, not just unlisted ones — Nx's default for untagged projects is total lockout, not lenience. Both `apps/api` (Story 1.2, tagged `scope:api`) and `apps/web` (Story 1.3, tagged `scope:web`) hit this the first time each needed to import from `libs/` — check whether a new/renamed project has a matching tag + `depConstraints` entry before assuming a cross-project import failure is anything more exotic.
 - `npm run ingest:federalist-papers` calls the real Gemini API and burns real free-tier quota — running the full 1–85 range more than once or twice in a session will exhaust it (hit twice during Story 1.2). Use `INGEST_FIRST_PAPER`/`INGEST_LAST_PAPER` to scope test runs to 1–2 papers.
 
 <!-- /bmad:context -->
