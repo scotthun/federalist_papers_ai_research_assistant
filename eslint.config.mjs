@@ -47,6 +47,8 @@ export default [
             },
             // apps/api is the thin orchestrator that composes documents + ai + database for
             // ingestion (Story 1.2) -- it never contains business logic itself, only wiring.
+            // scope:retrieval added in Story 2.2: PapersModule's new semantic-search endpoint is
+            // apps/api's first caller of libs/retrieval.
             {
               sourceTag: 'scope:api',
               onlyDependOnLibsWithTags: [
@@ -54,6 +56,7 @@ export default [
                 'scope:database',
                 'scope:ai',
                 'scope:documents',
+                'scope:retrieval',
                 'scope:shared',
               ],
             },
