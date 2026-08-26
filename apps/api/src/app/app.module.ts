@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { createDataSourceOptions } from '@federalist-research/database';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { AskModule } from './ask/ask.module';
 import { validateEnv } from './env.validation';
 import { PapersModule } from './papers/papers.module';
 
@@ -19,6 +20,7 @@ import { PapersModule } from './papers/papers.module';
       },
     }),
     PapersModule,
+    AskModule,
   ],
   controllers: [AppController],
   providers: [AppService],
