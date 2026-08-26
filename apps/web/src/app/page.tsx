@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import type { PaperSummary } from '@federalist-research/shared';
+import { ApiUnreachableNotice } from '@/components/api-unreachable-notice';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -8,28 +9,14 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-
-// apps/web never accesses the database directly (Structural Seed) -- every read goes through
-// apps/api's HTTP endpoints. This default matches apps/api's own default port (3333, Story
-// 1.3); API_BASE_URL overrides it (see apps/web/.env.example). Deliberately not
-// NEXT_PUBLIC_-prefixed: this value is only ever read here, inside a Server Component that never
-// runs in the browser, so it doesn't need (and shouldn't opt into) client-bundle inlining.
-const DEFAULT_API_BASE_URL = 'http://localhost:3333/api';
-
-// Unbounded external calls can hang (Story 1.2's ingest.ts hit the same class of problem and
-// added an AbortController timeout for the same reason) -- a timeout here just surfaces through
-// the same fetch-failure error path as any other failed request.
-const FETCH_TIMEOUT_MS = 5_000;
+import { API_FETCH_TIMEOUT_MS, resolveApiBaseUrl } from '@/lib/api-client';
 
 async function fetchPapers(): Promise<PaperSummary[]> {
-  const configuredBaseUrl = process.env.API_BASE_URL || DEFAULT_API_BASE_URL;
-  // Strip any trailing slash(es) so an operator-supplied base URL ending in "/" (e.g.
-  // "http://localhost:3333/api/") doesn't produce a double slash once "/papers" is appended.
-  const baseUrl = configuredBaseUrl.replace(/\/+$/, '');
+  const baseUrl = resolveApiBaseUrl();
 
   const response = await fetch(`${baseUrl}/papers`, {
     cache: 'no-store',
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(API_FETCH_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -82,11 +69,7 @@ export default async function BrowsePapersPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {hasError && (
-            <p role="alert" className="text-sm text-destructive">
-              We couldn&apos;t reach the Federalist Research server. Please try again shortly.
-            </p>
-          )}
+          {hasError && <ApiUnreachableNotice />}
 
           {!hasError && papers.length === 0 && (
             <p className="text-sm text-muted-foreground">
