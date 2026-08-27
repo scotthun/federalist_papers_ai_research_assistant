@@ -4,9 +4,11 @@ import type { AIProvider } from '@federalist-research/ai';
  * Fakes `createAIProvider` entirely (its own fail-fast/config-selection behavior is already
  * covered by `libs/ai`'s `ai-provider.factory.spec.ts`) so this spec covers only what
  * `createAIProviderProvider` itself adds: deferring the real construction call until the first
- * `generateEmbedding` invocation, and memoizing the result afterward -- the behavior that lets a
- * missing/invalid AI config break only `GET /api/papers/search/semantic`, never the whole
- * apps/api server at boot (see the provider's own doc comment for the full reasoning).
+ * `generateEmbedding`/`generateStructuredOutput` invocation, and memoizing the result afterward
+ * (shared across both methods) -- the behavior that lets a missing/invalid AI config break only
+ * the specific route/tier that needed it, never the whole apps/api server at boot (see the
+ * provider's own doc comment for the full reasoning). Moved here from `app/papers/` in Story 3.1
+ * once `AskModule` needed the exact same lazy wrapper as `PapersModule`.
  */
 jest.mock('@federalist-research/ai', () => ({
   createAIProvider: jest.fn(),
@@ -65,6 +67,7 @@ describe('createAIProviderProvider', () => {
   it('constructs the real provider lazily and memoizes it across multiple generateEmbedding calls', async () => {
     const fakeConcreteProvider = {
       generateEmbedding: jest.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+      generateStructuredOutput: jest.fn(),
     };
     mockedCreateAIProvider.mockReturnValue(fakeConcreteProvider);
     const aiProvider = buildLazyProvider();
@@ -75,5 +78,41 @@ describe('createAIProviderProvider', () => {
     expect(mockedCreateAIProvider).toHaveBeenCalledTimes(1);
     expect(fakeConcreteProvider.generateEmbedding).toHaveBeenNthCalledWith(1, 'first');
     expect(fakeConcreteProvider.generateEmbedding).toHaveBeenNthCalledWith(2, 'second');
+  });
+
+  it('rejects generateStructuredOutput with the same error createAIProvider throws', async () => {
+    mockedCreateAIProvider.mockImplementation(() => {
+      throw new Error('GEMINI_API_KEY is not set');
+    });
+    const aiProvider = buildLazyProvider();
+
+    await expect(
+      aiProvider.generateStructuredOutput({
+        systemInstruction: 'sys',
+        prompt: 'prompt',
+        schema: { safeParse: jest.fn() } as never,
+      }),
+    ).rejects.toThrow(/GEMINI_API_KEY/);
+  });
+
+  it('shares the same memoized construction between generateEmbedding and generateStructuredOutput', async () => {
+    const fakeConcreteProvider = {
+      generateEmbedding: jest.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+      generateStructuredOutput: jest.fn().mockResolvedValue({ answer: 'ok', citations: [] }),
+    };
+    mockedCreateAIProvider.mockReturnValue(fakeConcreteProvider);
+    const aiProvider = buildLazyProvider();
+
+    await aiProvider.generateEmbedding('first');
+    await aiProvider.generateStructuredOutput({
+      systemInstruction: 'sys',
+      prompt: 'prompt',
+      schema: { safeParse: jest.fn() } as never,
+    });
+
+    // Only one construction across both methods -- whichever is called first constructs and
+    // caches it for the other.
+    expect(mockedCreateAIProvider).toHaveBeenCalledTimes(1);
+    expect(fakeConcreteProvider.generateStructuredOutput).toHaveBeenCalledTimes(1);
   });
 });

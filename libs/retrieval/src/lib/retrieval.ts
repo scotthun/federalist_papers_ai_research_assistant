@@ -33,7 +33,10 @@ export interface RetrieveOptions {
   author?: string;
 }
 
-const DEFAULT_TOP_K = 5;
+/** Exported so callers that redeclare their own "match libs/retrieval's default" literal (e.g.
+ *  `apps/api`'s `AskService`/`calibrate-thresholds.ts`) can import and reuse this constant instead
+ *  -- a comment merely claiming to match this value doesn't actually enforce it. */
+export const DEFAULT_TOP_K = 5;
 
 // Matches the half-precision HNSW index InitSchema1787627139314 builds on the expression
 // `(embedding::halfvec(3072))` -- the ORDER BY/score expression here must cast the column the

@@ -3,7 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken } from '@nestjs/typeorm';
 import type { AIProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
-import { AI_PROVIDER } from './ai-provider.provider';
+import { AI_PROVIDER } from '../ai-provider.provider';
 import { PapersController } from './papers.controller';
 import { PapersService } from './papers.service';
 
@@ -80,7 +80,10 @@ describe('GET /api/papers (HTTP wiring)', () => {
       }),
       query: fakeDbQuery,
     } as unknown as DataSource;
-    const fakeAiProvider: AIProvider = { generateEmbedding: fakeGenerateEmbedding };
+    const fakeAiProvider: AIProvider = {
+      generateEmbedding: fakeGenerateEmbedding,
+      generateStructuredOutput: jest.fn(),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       controllers: [PapersController],

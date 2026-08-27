@@ -113,6 +113,22 @@
         "command": "node dist/apps/api-eval-retrieval/main.js"
       }
     },
+    "build-calibrate-thresholds": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "webpack-cli build --config webpack.calibrate-thresholds.config.js",
+        "cwd": "apps/api"
+      }
+    },
+    "calibrate-thresholds": {
+      "dependsOn": ["build-calibrate-thresholds"],
+      "cache": false,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node dist/apps/api-calibrate-thresholds/main.js"
+      }
+    },
     "test": {
       "options": {
         "passWithNoTests": true

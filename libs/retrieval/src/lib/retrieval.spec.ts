@@ -12,7 +12,10 @@ import { retrieveRelevantChunks } from './retrieval';
  * hand-crafted deterministic embeddings -- never a real Gemini call either.
  */
 function fakeAiProvider(embedding: number[] = [0.1, 0.2, 0.3]): AIProvider {
-  return { generateEmbedding: jest.fn().mockResolvedValue(embedding) };
+  return {
+    generateEmbedding: jest.fn().mockResolvedValue(embedding),
+    generateStructuredOutput: jest.fn(),
+  };
 }
 
 function fakeDataSource(rows: unknown[] = []): { dataSource: DataSource; query: jest.Mock } {
