@@ -1,7 +1,9 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken } from '@nestjs/typeorm';
+import type { AIProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
+import { AI_PROVIDER } from './ai-provider.provider';
 import { PapersController } from './papers.controller';
 import { PapersService } from './papers.service';
 
@@ -51,7 +53,23 @@ describe('GET /api/papers (HTTP wiring)', () => {
     };
   }
 
+  // The semantic-search endpoint's fake row -- `retrieveRelevantChunks` (libs/retrieval) queries
+  // `dataSource.query(...)` directly (raw pgvector SQL), never `getRepository(...)`, so it needs
+  // its own fake alongside the entity-repository fakes above.
+  const fakeRetrievedChunkRow = {
+    chunkId: 'chunk-1',
+    paperNumber: 70,
+    paperTitle: 'The Executive Department Further Considered',
+    content: 'The ingredients which constitute energy in the executive...',
+    score: 0.91,
+  };
+
+  let fakeGenerateEmbedding: jest.Mock;
+  let fakeDbQuery: jest.Mock;
+
   beforeAll(async () => {
+    fakeGenerateEmbedding = jest.fn().mockResolvedValue([0.1, 0.2, 0.3]);
+    fakeDbQuery = jest.fn().mockResolvedValue([fakeRetrievedChunkRow]);
     const fakeDataSource = {
       getRepository: jest.fn().mockReturnValue({
         find: jest.fn().mockResolvedValue([fakePaperRow]),
@@ -60,13 +78,16 @@ describe('GET /api/papers (HTTP wiring)', () => {
         ),
         createQueryBuilder: jest.fn().mockImplementation(() => fakeQueryBuilder()),
       }),
+      query: fakeDbQuery,
     } as unknown as DataSource;
+    const fakeAiProvider: AIProvider = { generateEmbedding: fakeGenerateEmbedding };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       controllers: [PapersController],
       providers: [
         PapersService,
         { provide: getDataSourceToken(), useValue: fakeDataSource },
+        { provide: AI_PROVIDER, useValue: fakeAiProvider },
       ],
     }).compile();
 
@@ -147,6 +168,47 @@ describe('GET /api/papers (HTTP wiring)', () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(Array.isArray(body)).toBe(true);
+  });
+
+  it('GET /api/papers/search/semantic is reachable at the global-prefixed route and returns RetrievedChunk[]', async () => {
+    const response = await fetch(`${baseUrl}/api/papers/search/semantic?q=executive+power`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([fakeRetrievedChunkRow]);
+    expect(fakeGenerateEmbedding).toHaveBeenCalledWith('executive power');
+  });
+
+  it('GET /api/papers/search/semantic parses topK, paperNumber, and author into the query sent to the DB', async () => {
+    await fetch(
+      `${baseUrl}/api/papers/search/semantic?q=executive+power&topK=3&paperNumber=70&author=Hamilton`,
+    );
+
+    const [, params] = fakeDbQuery.mock.calls[fakeDbQuery.mock.calls.length - 1];
+    // vectorLiteral, paperNumber, authorLikeTerm, topK -- see retrieval.ts's param ordering.
+    expect(params).toEqual(['[0.1,0.2,0.3]', 70, '%Hamilton%', 3]);
+  });
+
+  it('GET /api/papers/search/semantic returns an empty array without calling the embedding model when q is blank', async () => {
+    fakeGenerateEmbedding.mockClear();
+
+    const response = await fetch(`${baseUrl}/api/papers/search/semantic`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([]);
+    expect(fakeGenerateEmbedding).not.toHaveBeenCalled();
+  });
+
+  // I/O Edge-Case Matrix: "Embedding call fails ... Endpoint returns a clear error response ...
+  // Never a hang or an unhandled crash." A real HTTP round trip proves Nest's default exception
+  // filter turns the rejected promise into an actual 500 response, not a hang.
+  it('GET /api/papers/search/semantic returns a 500, not a hang, when the embedding call fails', async () => {
+    fakeGenerateEmbedding.mockRejectedValueOnce(
+      new Error('AI_PROVIDER is "gemini" but GEMINI_API_KEY is not set.'),
+    );
+
+    const response = await fetch(`${baseUrl}/api/papers/search/semantic?q=executive+power`);
+
+    expect(response.status).toBe(500);
   });
 
   it('GET /api/papers/:paperNumber is reachable at the global-prefixed route and returns PaperDetail', async () => {

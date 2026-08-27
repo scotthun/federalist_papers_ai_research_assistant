@@ -72,7 +72,10 @@ export async function searchPapers(
 // sequence for the characters escaped after it) then wrapping in `%...%` keeps the substring
 // match honest while still relying on Postgres's own default `ESCAPE '\'` (no query-level
 // `ESCAPE` clause needed).
-function escapeLikeTerm(term: string): string {
+//
+// Exported (Story 2.2) so `libs/retrieval`'s `author` filter reuses this exact escaping instead
+// of hand-duplicating it -- same "case-insensitive substring" convention, same edge cases.
+export function escapeLikeTerm(term: string): string {
   return term.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 

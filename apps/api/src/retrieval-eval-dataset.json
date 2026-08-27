@@ -1,0 +1,34 @@
+[
+  {
+    "question": "What causes political factions to form, and why might a large, diverse republic be better at controlling their harmful effects than a small one?",
+    "expectedPapers": [10]
+  },
+  {
+    "question": "Why would a government still need internal checks and balances between its branches even if the people running it were as virtuous as angels?",
+    "expectedPapers": [51]
+  },
+  {
+    "question": "What is the purpose of the general introduction that opens the Federalist Papers?",
+    "expectedPapers": [1]
+  },
+  {
+    "question": "Why does Publius argue for one strong president instead of a council or committee running the executive branch?",
+    "expectedPapers": [67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77]
+  },
+  {
+    "question": "Why is the judiciary considered the weakest of the three branches of government, with the least ability to threaten individual liberty on its own?",
+    "expectedPapers": [78]
+  },
+  {
+    "question": "What arguments are made against adding an explicit list of individual rights to a constitution that already limits the government to only its enumerated powers?",
+    "expectedPapers": [84]
+  },
+  {
+    "question": "What distinguishes a republic from other forms of representative government, and what features must a government have to properly be called republican?",
+    "expectedPapers": [39]
+  },
+  {
+    "question": "What weaknesses in the existing confederation of states make a stronger, more unified national government necessary for the country's safety and survival?",
+    "expectedPapers": [15]
+  }
+]

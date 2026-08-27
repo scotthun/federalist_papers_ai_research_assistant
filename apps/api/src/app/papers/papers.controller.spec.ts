@@ -5,10 +5,20 @@ import { PapersService } from './papers.service';
 
 describe('PapersController', () => {
   let controller: PapersController;
-  let service: { findAll: jest.Mock; findOne: jest.Mock; search: jest.Mock };
+  let service: {
+    findAll: jest.Mock;
+    findOne: jest.Mock;
+    search: jest.Mock;
+    searchSemantic: jest.Mock;
+  };
 
   beforeEach(async () => {
-    service = { findAll: jest.fn(), findOne: jest.fn(), search: jest.fn() };
+    service = {
+      findAll: jest.fn(),
+      findOne: jest.fn(),
+      search: jest.fn(),
+      searchSemantic: jest.fn(),
+    };
 
     const app: TestingModule = await Test.createTestingModule({
       controllers: [PapersController],
@@ -46,6 +56,120 @@ describe('PapersController', () => {
       service.search.mockResolvedValue([]);
 
       await expect(controller.search('zzznonsensezzz')).resolves.toEqual([]);
+    });
+  });
+
+  describe('searchSemantic', () => {
+    it('delegates to PapersService.searchSemantic with the raw query and no options when none are given', async () => {
+      const chunks = [
+        {
+          chunkId: 'chunk-1',
+          paperNumber: 51,
+          paperTitle: 'The Structure of the Government',
+          content: 'Ambition must be made to counteract ambition.',
+          score: 0.87,
+        },
+      ];
+      service.searchSemantic.mockResolvedValue(chunks);
+
+      await expect(
+        controller.searchSemantic('how does government check itself'),
+      ).resolves.toEqual(chunks);
+      expect(service.searchSemantic).toHaveBeenCalledWith(
+        'how does government check itself',
+        {},
+      );
+    });
+
+    it('passes an empty string to the service when q is absent', async () => {
+      service.searchSemantic.mockResolvedValue([]);
+
+      await controller.searchSemantic(undefined);
+
+      expect(service.searchSemantic).toHaveBeenCalledWith('', {});
+    });
+
+    it('parses topK and paperNumber into RetrieveOptions', async () => {
+      service.searchSemantic.mockResolvedValue([]);
+
+      await controller.searchSemantic('executive power', '3', '70');
+
+      expect(service.searchSemantic).toHaveBeenCalledWith('executive power', {
+        topK: 3,
+        paperNumber: 70,
+      });
+    });
+
+    it('passes a trimmed author option through', async () => {
+      service.searchSemantic.mockResolvedValue([]);
+
+      await controller.searchSemantic('union', undefined, undefined, '  Madison  ');
+
+      expect(service.searchSemantic).toHaveBeenCalledWith('union', { author: 'Madison' });
+    });
+
+    it('omits a blank/whitespace-only author instead of passing it through', async () => {
+      service.searchSemantic.mockResolvedValue([]);
+
+      await controller.searchSemantic('union', undefined, undefined, '   ');
+
+      expect(service.searchSemantic).toHaveBeenCalledWith('union', {});
+    });
+
+    // Malformed topK/paperNumber (Number()-lenient lookalikes, negatives, non-numeric junk)
+    // must never crash the request -- they're simply ignored, same "never a hang or an
+    // unhandled crash" contract as the rest of this controller's query-param handling.
+    it.each(['0x10', '1e2', '1.0', '-3', 'abc'])(
+      'ignores a malformed topK value (%s) instead of passing it through',
+      async (malformed) => {
+        service.searchSemantic.mockResolvedValue([]);
+
+        await controller.searchSemantic('union', malformed);
+
+        expect(service.searchSemantic).toHaveBeenCalledWith('union', {});
+      },
+    );
+
+    // A malformed paperNumber changes result-set semantics (an unintended filter), not just a
+    // limit -- same parsePositiveIntQueryParam helper as topK above, so it must be just as safe.
+    it.each(['0x10', '1e2', '1.0', '-3', 'abc'])(
+      'ignores a malformed paperNumber value (%s) instead of passing it through as a filter',
+      async (malformed) => {
+        service.searchSemantic.mockResolvedValue([]);
+
+        await controller.searchSemantic('union', undefined, malformed);
+
+        expect(service.searchSemantic).toHaveBeenCalledWith('union', {});
+      },
+    );
+
+    // No upper bound previously meant `?topK=999999` passed straight through as the SQL LIMIT.
+    it('clamps a topK value above the maximum (50) instead of passing it through unbounded', async () => {
+      service.searchSemantic.mockResolvedValue([]);
+
+      await controller.searchSemantic('union', '999999');
+
+      expect(service.searchSemantic).toHaveBeenCalledWith('union', { topK: 50 });
+    });
+
+    it('passes a topK value at the maximum (50) through unchanged', async () => {
+      service.searchSemantic.mockResolvedValue([]);
+
+      await controller.searchSemantic('union', '50');
+
+      expect(service.searchSemantic).toHaveBeenCalledWith('union', { topK: 50 });
+    });
+
+    it('normalizes a repeated query param to its first value for every param', async () => {
+      service.searchSemantic.mockResolvedValue([]);
+
+      await controller.searchSemantic(['a', 'b'], ['3', '5'], ['70', '80'], ['Hamilton', 'Madison']);
+
+      expect(service.searchSemantic).toHaveBeenCalledWith('a', {
+        topK: 3,
+        paperNumber: 70,
+        author: 'Hamilton',
+      });
     });
   });
 

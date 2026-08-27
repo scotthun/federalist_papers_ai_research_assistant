@@ -49,3 +49,23 @@
 - source_spec: `docs/implementation/spec-2-1-search-by-metadata.md`
   summary: `findByKeyword` performs two full round trips to Postgres per keyword search (one `getRawMany` for matching ids, then a second `find` by `In(ids)` to rehydrate authors) where a single query could suffice.
   evidence: Deliberate tradeoff, not an oversight — a single query with the match condition folded into the same `WHERE` would silently drop non-matching co-authors from the hydrated `authors` relation (the exact joint-authorship bug this story's boundaries exist to prevent). Harmless at the real 85-paper corpus; revisit only if this repository's scale changes enough for two round trips per search to matter.
+
+- source_spec: `docs/implementation/spec-2-2-search-by-semantic-concept.md`
+  summary: pgvector's HNSW index is approximate (ANN), and a selective `paperNumber`/`author` WHERE filter combined with `ORDER BY ... LIMIT k` can under-return true top-K results unless iterative index scans are enabled — untested at real-corpus scale since the integration test's fixture tables are too small for Postgres to ever choose the ANN index path over a sequential scan.
+  evidence: Real risk in principle, but proving/fixing it needs either a much larger synthetic fixture set or the real 85-paper embedded corpus, and no filtered-semantic-search precision issue has actually been observed yet. Revisit if a real filtered query is ever seen to miss an expected result, or once pgvector's `hnsw.iterative_scan` setting is evaluated.
+
+- source_spec: `docs/implementation/spec-2-2-search-by-semantic-concept.md`
+  summary: The eval script's `TOP_K` is a hardcoded constant, not configurable via env var, and its only output is unstructured `Logger.log` lines — no persisted, structured results artifact.
+  evidence: `decisions.md`'s "Confidence tiering" section names this dataset/script as the intended mechanism to later sweep candidate threshold values, which in practice means varying `topK` too and comparing structured results across runs. Not needed by this story's own AC; revisit when Epic 3's confidence-threshold calibration work actually starts.
+
+- source_spec: `docs/implementation/spec-2-2-search-by-semantic-concept.md`
+  summary: `retrieveRelevantChunks` doesn't validate that the embedding returned by `aiProvider.generateEmbedding` is a well-formed, finite-number array of the expected dimension before building the pgvector query literal — a misbehaving provider would surface only as an opaque Postgres error.
+  evidence: Matches this codebase's existing convention of trusting internal contracts at the lib layer rather than re-validating every interface boundary (same call already made for `topK`/`paperNumber` elsewhere); currently masked because `GeminiProvider` already validates its own output dimension. Revisit if a second `AIProvider` implementation ships without that guarantee.
+
+- source_spec: `docs/implementation/spec-2-2-search-by-semantic-concept.md`
+  summary: `GET /api/papers/search/semantic` is public, unauthenticated, and triggers a real metered Gemini embedding call on every request, with no rate limiting or cost-exposure guard.
+  evidence: `decisions.md`'s "Rate limiting / cost exposure" section describes exactly this risk shape, but `epics.md` explicitly assigns the DB-backed limiter to Epic 4, not this story — this is an accepted, temporary gap per the project's own roadmap, not a defect introduced here. Worth flagging prominently until Epic 4 lands, since real API cost is exposed in the meantime.
+
+- source_spec: `docs/implementation/spec-2-2-search-by-semantic-concept.md`
+  summary: The lazy `AI_PROVIDER` DI wrapper's memoization (`ai-provider.provider.ts`) is only race-safe under concurrent requests because `createAIProvider()` is currently fully synchronous; no test proves it stays correct if that factory ever became async (e.g. an async secrets-manager lookup).
+  evidence: Not a live bug today — verified the current synchronous construction can't race under `Promise.all`. Revisit only if `createAIProvider()` (or a future provider) gains a genuinely async construction step; a real in-flight-promise memoization pattern would be the fix then, not before.

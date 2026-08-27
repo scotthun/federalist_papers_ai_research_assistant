@@ -1,5 +1,12 @@
+import type { AIProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
 import { PapersService } from './papers.service';
+
+/** None of findAll/search/findOne touch the AIProvider boundary at all -- a fake that's never
+ *  expected to be called is enough to satisfy PapersService's constructor for those tests. */
+function unusedAiProvider(): AIProvider {
+  return { generateEmbedding: jest.fn() };
+}
 
 /**
  * Fakes only the DataSource boundary (no live Postgres) -- findAllPapersForBrowse itself is
@@ -13,7 +20,7 @@ function createService(papers: unknown[]): PapersService {
       find: jest.fn().mockResolvedValue(papers),
     }),
   } as unknown as DataSource;
-  return new PapersService(dataSource);
+  return new PapersService(dataSource, unusedAiProvider());
 }
 
 /**
@@ -28,7 +35,7 @@ function createServiceForDetail(row: unknown): PapersService {
       findOne: jest.fn().mockResolvedValue(row),
     }),
   } as unknown as DataSource;
-  return new PapersService(dataSource);
+  return new PapersService(dataSource, unusedAiProvider());
 }
 
 /**
@@ -47,7 +54,26 @@ function createServiceForSearch(rows: unknown[]): PapersService {
       find: jest.fn().mockResolvedValue(rows),
     }),
   } as unknown as DataSource;
-  return new PapersService(dataSource);
+  return new PapersService(dataSource, unusedAiProvider());
+}
+
+/**
+ * Fakes both boundaries `retrieveRelevantChunks` composes -- `retrieveRelevantChunks` itself
+ * (the raw pgvector SQL, filter-before-limit correctness) is exercised for real, against real
+ * Postgres, by libs/retrieval's retrieval.integration.spec.ts. This test covers only that
+ * PapersService.searchSemantic wires the DataSource/AIProvider/query/options through to it
+ * untouched and returns its result as-is (Story 2.2's "pure pass-through" contract).
+ */
+function createServiceForSemantic(options: {
+  embedding?: number[];
+  rows?: unknown[];
+}): { service: PapersService; aiProvider: AIProvider; query: jest.Mock } {
+  const aiProvider: AIProvider = {
+    generateEmbedding: jest.fn().mockResolvedValue(options.embedding ?? [0.1, 0.2, 0.3]),
+  };
+  const query = jest.fn().mockResolvedValue(options.rows ?? []);
+  const dataSource = { query } as unknown as DataSource;
+  return { service: new PapersService(dataSource, aiProvider), aiProvider, query };
 }
 
 describe('PapersService', () => {
@@ -150,6 +176,59 @@ describe('PapersService', () => {
       const service = createServiceForSearch([]);
 
       await expect(service.search('999999')).resolves.toEqual([]);
+    });
+  });
+
+  describe('searchSemantic', () => {
+    it('embeds the query, queries the DB, and maps the rows into RetrievedChunk[]', async () => {
+      const { service, aiProvider, query } = createServiceForSemantic({
+        rows: [
+          {
+            chunkId: 'chunk-1',
+            paperNumber: 51,
+            paperTitle: 'The Structure of the Government',
+            content: 'Ambition must be made to counteract ambition.',
+            score: 0.87,
+          },
+        ],
+      });
+
+      const result = await service.searchSemantic('how does government check itself', {
+        topK: 5,
+      });
+
+      expect(aiProvider.generateEmbedding).toHaveBeenCalledWith(
+        'how does government check itself',
+      );
+      expect(query).toHaveBeenCalled();
+      expect(result).toEqual([
+        {
+          chunkId: 'chunk-1',
+          paperNumber: 51,
+          paperTitle: 'The Structure of the Government',
+          content: 'Ambition must be made to counteract ambition.',
+          score: 0.87,
+        },
+      ]);
+    });
+
+    it('returns an empty array for an empty query without calling the embedding model', async () => {
+      const { service, aiProvider } = createServiceForSemantic({});
+
+      await expect(service.searchSemantic('', {})).resolves.toEqual([]);
+      expect(aiProvider.generateEmbedding).not.toHaveBeenCalled();
+    });
+
+    it('propagates an embedding-provider failure as a rejected promise, never swallowing it', async () => {
+      const aiProvider: AIProvider = {
+        generateEmbedding: jest.fn().mockRejectedValue(new Error('GEMINI_API_KEY is not set')),
+      };
+      const dataSource = { query: jest.fn() } as unknown as DataSource;
+      const service = new PapersService(dataSource, aiProvider);
+
+      await expect(service.searchSemantic('a query', {})).rejects.toThrow(
+        /GEMINI_API_KEY/,
+      );
     });
   });
 });

@@ -9,7 +9,8 @@
     "dev": "nx run-many --target=serve --projects=api,web --parallel",
     "db:migrate": "nx run api:migrate",
     "ingest:federalist-papers": "nx run api:ingest",
-    "test:db-integration": "DATABASE_URL=postgres://federalist:federalist@localhost:5432/federalist_research nx run database:test --skip-nx-cache"
+    "eval:retrieval": "nx run api:eval-retrieval",
+    "test:db-integration": "DATABASE_URL=postgres://federalist:federalist@localhost:5432/federalist_research nx run-many -t test --projects=database,retrieval --skip-nx-cache"
   },
   "private": true,
   "devDependencies": {
