@@ -61,7 +61,8 @@
     "webpack-dev-server": "^5.2.1"
   },
   "dependencies": {
-    "@google/genai": "2.18.0",
+    "@langchain/core": "1.2.9",
+    "@langchain/google-genai": "2.1.31",
     "@nestjs/common": "11.2.1",
     "@nestjs/core": "11.2.1",
     "@nestjs/platform-express": "11.2.1",
@@ -70,6 +71,7 @@
     "cheerio": "1.2.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
+    "langchain": "1.5.10",
     "next": "16.3.2",
     "pg": "8.23.0",
     "react": "^19.0.0",
