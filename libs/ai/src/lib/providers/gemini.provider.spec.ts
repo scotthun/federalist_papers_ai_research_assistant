@@ -1,52 +1,66 @@
-const embedContent = jest.fn();
-const generateContent = jest.fn();
+const embedQuery = jest.fn();
+const invoke = jest.fn();
+const withStructuredOutput = jest.fn(() => ({ invoke }));
 
-jest.mock('@google/genai', () => ({
-  GoogleGenAI: jest.fn().mockImplementation(() => ({
-    models: { embedContent, generateContent },
+jest.mock('@langchain/google-genai', () => ({
+  ChatGoogleGenerativeAI: jest.fn().mockImplementation(() => ({
+    withStructuredOutput,
+  })),
+  GoogleGenerativeAIEmbeddings: jest.fn().mockImplementation(() => ({
+    embedQuery,
   })),
 }));
 
 // Imported after the mock so the class under test picks up the mocked SDK.
-import { GoogleGenAI } from '@google/genai';
+import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import { z } from 'zod';
 import { GeminiProvider } from './gemini.provider';
 
 describe('GeminiProvider', () => {
   beforeEach(() => {
-    embedContent.mockReset();
-    generateContent.mockReset();
-    (GoogleGenAI as jest.Mock).mockClear();
+    embedQuery.mockReset();
+    invoke.mockReset();
+    withStructuredOutput.mockClear();
+    jest.mocked(ChatGoogleGenerativeAI).mockClear();
+    jest.mocked(GoogleGenerativeAIEmbeddings).mockClear();
   });
 
   it('throws if constructed without an API key', () => {
     expect(() => new GeminiProvider({ apiKey: '' })).toThrow(/apiKey/);
   });
 
-  it('constructs the underlying SDK client with the given API key', () => {
+  it('constructs the underlying chat model and embeddings client with the given API key', () => {
     new GeminiProvider({ apiKey: 'test-key' });
-    expect(GoogleGenAI).toHaveBeenCalledWith({ apiKey: 'test-key' });
+
+    // maxRetries: 0 is pinned here too -- @langchain/core's AsyncCaller otherwise defaults to 6
+    // silent internal retries, which would violate "never retries internally" at runtime even
+    // though the mocks below can't themselves exercise that retry machinery.
+    expect(jest.mocked(ChatGoogleGenerativeAI)).toHaveBeenCalledWith({
+      model: 'gemini-3.6-flash',
+      apiKey: 'test-key',
+      maxRetries: 0,
+    });
+    expect(jest.mocked(GoogleGenerativeAIEmbeddings)).toHaveBeenCalledWith({
+      model: 'gemini-embedding-001',
+      apiKey: 'test-key',
+      maxRetries: 0,
+    });
   });
 
   const validEmbedding = Array.from({ length: 3072 }, (_, i) => i / 3072);
 
-  it('calls embedContent with the gemini-embedding-001 model and returns the embedding values', async () => {
-    embedContent.mockResolvedValue({
-      embeddings: [{ values: validEmbedding }],
-    });
+  it('calls embedQuery with the gemini-embedding-001 model and returns the embedding values', async () => {
+    embedQuery.mockResolvedValue(validEmbedding);
     const provider = new GeminiProvider({ apiKey: 'test-key' });
 
     const result = await provider.generateEmbedding('some text');
 
-    expect(embedContent).toHaveBeenCalledWith({
-      model: 'gemini-embedding-001',
-      contents: 'some text',
-    });
+    expect(embedQuery).toHaveBeenCalledWith('some text');
     expect(result).toEqual(validEmbedding);
   });
 
   it('throws a clear error if Gemini returns no embedding values', async () => {
-    embedContent.mockResolvedValue({ embeddings: [] });
+    embedQuery.mockResolvedValue([]);
     const provider = new GeminiProvider({ apiKey: 'test-key' });
 
     await expect(provider.generateEmbedding('some text')).rejects.toThrow(
@@ -55,14 +69,20 @@ describe('GeminiProvider', () => {
   });
 
   it('throws a clear error naming both dimensions if Gemini returns the wrong embedding size', async () => {
-    embedContent.mockResolvedValue({
-      embeddings: [{ values: [0.1, 0.2, 0.3] }],
-    });
+    embedQuery.mockResolvedValue([0.1, 0.2, 0.3]);
     const provider = new GeminiProvider({ apiKey: 'test-key' });
 
     await expect(provider.generateEmbedding('some text')).rejects.toThrow(
       /3 dimensions, expected 3072/,
     );
+  });
+
+  it('propagates a rejection from the underlying embedQuery call as-is', async () => {
+    const networkError = new Error('network error: ECONNRESET');
+    embedQuery.mockRejectedValue(networkError);
+    const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+    await expect(provider.generateEmbedding('some text')).rejects.toBe(networkError);
   });
 
   describe('generateStructuredOutput', () => {
@@ -71,10 +91,8 @@ describe('GeminiProvider', () => {
       citations: z.array(z.object({ chunkId: z.string() })),
     });
 
-    it('calls generateContent with JSON-mode config and a JSON Schema built from the passed Zod schema', async () => {
-      generateContent.mockResolvedValue({
-        text: JSON.stringify({ answer: 'Grounded answer.', citations: [{ chunkId: 'c1' }] }),
-      });
+    it('builds a structured-output runnable from the passed Zod schema and invokes it with a system/human message pair', async () => {
+      invoke.mockResolvedValue({ answer: 'Grounded answer.', citations: [{ chunkId: 'c1' }] });
       const provider = new GeminiProvider({ apiKey: 'test-key' });
 
       await provider.generateStructuredOutput({
@@ -83,26 +101,20 @@ describe('GeminiProvider', () => {
         schema: outputSchema,
       });
 
-      expect(generateContent).toHaveBeenCalledTimes(1);
-      const [call] = generateContent.mock.calls[0];
-      // Pins the exact generation model string, matching the embedding test's equivalent
-      // `model: 'gemini-embedding-001'` assertion above -- without this, the model used for
-      // generation could silently drift with no test catching it.
-      expect(call.model).toBe('gemini-3.6-flash');
-      expect(call.contents).toBe('QUESTION: why?');
-      expect(call.config.systemInstruction).toBe('Answer only from the evidence.');
-      expect(call.config.responseMimeType).toBe('application/json');
-      // Not asserting on the exact JSON Schema shape (that's z.toJSONSchema's own contract) --
-      // just that a schema hint derived from the passed Zod schema was actually sent, matching
-      // this method's "responseJsonSchema, always re-validated afterward" contract.
-      expect(call.config.responseJsonSchema).toBeDefined();
-      expect(call.config.responseJsonSchema.properties.answer).toBeDefined();
+      // Pins that the schema handed to LangChain is the caller's own Zod schema, not some
+      // internal reshaping of it -- matching this method's "the real contract is the Zod
+      // validation, not the SDK's own schema hinting" guarantee.
+      expect(withStructuredOutput).toHaveBeenCalledTimes(1);
+      expect(withStructuredOutput).toHaveBeenCalledWith(outputSchema);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenCalledWith([
+        ['system', 'Answer only from the evidence.'],
+        ['human', 'QUESTION: why?'],
+      ]);
     });
 
     it('returns the parsed-and-validated JSON on a schema-valid response', async () => {
-      generateContent.mockResolvedValue({
-        text: JSON.stringify({ answer: 'Grounded answer.', citations: [{ chunkId: 'c1' }] }),
-      });
+      invoke.mockResolvedValue({ answer: 'Grounded answer.', citations: [{ chunkId: 'c1' }] });
       const provider = new GeminiProvider({ apiKey: 'test-key' });
 
       const result = await provider.generateStructuredOutput({
@@ -114,40 +126,12 @@ describe('GeminiProvider', () => {
       expect(result).toEqual({ answer: 'Grounded answer.', citations: [{ chunkId: 'c1' }] });
     });
 
-    it('throws a clear error if Gemini returns no text', async () => {
-      generateContent.mockResolvedValue({ text: undefined });
-      const provider = new GeminiProvider({ apiKey: 'test-key' });
-
-      await expect(
-        provider.generateStructuredOutput({
-          systemInstruction: 'sys',
-          prompt: 'prompt',
-          schema: outputSchema,
-        }),
-      ).rejects.toThrow(/no text response/);
-    });
-
-    it('throws a clear error if Gemini returns text that is not valid JSON', async () => {
-      generateContent.mockResolvedValue({ text: 'not json at all' });
-      const provider = new GeminiProvider({ apiKey: 'test-key' });
-
-      await expect(
-        provider.generateStructuredOutput({
-          systemInstruction: 'sys',
-          prompt: 'prompt',
-          schema: outputSchema,
-        }),
-      ).rejects.toThrow(/not valid JSON/);
-    });
-
-    // This is the load-bearing case: even though the SDK was given a schema hint, the response
-    // is always re-validated against the real Zod schema afterward -- never trusted just because
-    // it parsed as JSON (this story's Boundaries: "always re-validated ... regardless of what the
-    // SDK's own schema hinting does").
-    it('throws a clear error if Gemini returns JSON that does not satisfy the Zod schema', async () => {
-      generateContent.mockResolvedValue({
-        text: JSON.stringify({ answer: 'Missing citations field entirely.' }),
-      });
+    // This is the load-bearing case: even though LangChain does its own schema-hinted parsing
+    // internally, the response is always re-validated against the real Zod schema afterward --
+    // never trusted just because the Runnable resolved (this story's Boundaries: "always
+    // re-validated ... regardless of what schema hinting the underlying SDK supports").
+    it('throws a clear error if the resolved value does not satisfy the Zod schema, making exactly one call', async () => {
+      invoke.mockResolvedValue({ answer: 'Missing citations field entirely.' });
       const provider = new GeminiProvider({ apiKey: 'test-key' });
 
       await expect(
@@ -157,16 +141,19 @@ describe('GeminiProvider', () => {
           schema: outputSchema,
         }),
       ).rejects.toThrow(/failed schema validation/);
+      // Matrix's "exactly one call made" guarantee for this scenario specifically -- distinct
+      // from the invoke-rejects scenario below, which is a separate row in the matrix.
+      expect(invoke).toHaveBeenCalledTimes(1);
     });
 
-    // Distinct from the "bad/missing/invalid-JSON text" cases above, which all cover
-    // generateContent *resolving* with an unusable value -- this covers the underlying SDK call
-    // itself *rejecting* (e.g. a network error), proving that rejection propagates through
-    // generateStructuredOutput as-is rather than being swallowed or re-wrapped into a different
-    // error.
-    it('propagates a rejection from the underlying generateContent call as-is', async () => {
+    // Distinct from the schema-validation-failure case above, which covers the Runnable
+    // *resolving* with an unusable value -- this covers the underlying call itself *rejecting*
+    // (e.g. a network error, or LangChain's own parser finding no usable tool call), proving that
+    // rejection propagates through generateStructuredOutput as-is rather than being swallowed or
+    // re-wrapped into a different error.
+    it('propagates a rejection from the underlying invoke call as-is', async () => {
       const networkError = new Error('network error: ECONNRESET');
-      generateContent.mockRejectedValue(networkError);
+      invoke.mockRejectedValue(networkError);
       const provider = new GeminiProvider({ apiKey: 'test-key' });
 
       await expect(
@@ -178,8 +165,8 @@ describe('GeminiProvider', () => {
       ).rejects.toBe(networkError);
     });
 
-    it('never retries internally -- exactly one generateContent call per invocation', async () => {
-      generateContent.mockResolvedValue({ text: 'not json' });
+    it('never retries internally -- exactly one invoke call per invocation', async () => {
+      invoke.mockRejectedValue(new Error('unusable response'));
       const provider = new GeminiProvider({ apiKey: 'test-key' });
 
       await expect(
@@ -189,7 +176,7 @@ describe('GeminiProvider', () => {
           schema: outputSchema,
         }),
       ).rejects.toThrow();
-      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenCalledTimes(1);
     });
   });
 });

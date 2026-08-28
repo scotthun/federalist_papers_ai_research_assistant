@@ -1,7 +1,6 @@
-jest.mock('@google/genai', () => ({
-  GoogleGenAI: jest
-    .fn()
-    .mockImplementation(() => ({ models: { embedContent: jest.fn() } })),
+jest.mock('@langchain/google-genai', () => ({
+  ChatGoogleGenerativeAI: jest.fn().mockImplementation(() => ({})),
+  GoogleGenerativeAIEmbeddings: jest.fn().mockImplementation(() => ({})),
 }));
 
 import { createAIProvider } from './ai-provider.factory';
