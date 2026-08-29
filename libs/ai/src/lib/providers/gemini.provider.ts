@@ -1,5 +1,5 @@
-import { GoogleGenAI } from '@google/genai';
-import { z, type ZodType } from 'zod';
+import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
+import type { ZodType } from 'zod';
 import type { AIProvider } from '../ai-provider.interface';
 
 // Verified live against the Gemini API (Story 0.1 spike, 2026-08-24): gemini-embedding-001
@@ -18,25 +18,37 @@ export interface GeminiProviderOptions {
   apiKey: string;
 }
 
-/** Concrete Adapter wrapping `@google/genai` behind the `AIProvider` interface -- the one
- *  initial provider (stack.md: "implement at least one provider initially"). */
+/** Concrete Adapter wrapping `@langchain/google-genai` behind the `AIProvider` interface -- the
+ *  one initial provider (stack.md: "implement at least one provider initially"). LangChain.js is
+ *  the architecture-mandated AI layer (ARCHITECTURE-SPINE.md); it is an implementation detail of
+ *  this one adapter class, never imported by any consumer outside `libs/ai` (GH-24). */
 export class GeminiProvider implements AIProvider {
-  private readonly client: GoogleGenAI;
+  private readonly chatModel: ChatGoogleGenerativeAI;
+  private readonly embeddings: GoogleGenerativeAIEmbeddings;
 
   constructor(options: GeminiProviderOptions) {
     if (!options.apiKey) {
       throw new Error('GeminiProvider requires a non-empty apiKey');
     }
-    this.client = new GoogleGenAI({ apiKey: options.apiKey });
+    // maxRetries: 0 -- @langchain/core's AsyncCaller otherwise defaults to 6 silent internal
+    // retries on transient errors, which would violate this method's "never retries internally
+    // -- one model call per invocation" contract at runtime (the caller's own retry policy, e.g.
+    // this story's citation-verification retry, is the only place a retry is allowed to happen).
+    this.chatModel = new ChatGoogleGenerativeAI({
+      model: GENERATION_MODEL,
+      apiKey: options.apiKey,
+      maxRetries: 0,
+    });
+    this.embeddings = new GoogleGenerativeAIEmbeddings({
+      model: EMBEDDING_MODEL,
+      apiKey: options.apiKey,
+      maxRetries: 0,
+    });
   }
 
   async generateEmbedding(text: string): Promise<number[]> {
-    const response = await this.client.models.embedContent({
-      model: EMBEDDING_MODEL,
-      contents: text,
-    });
-    const values = response.embeddings?.[0]?.values;
-    if (!values) {
+    const values = await this.embeddings.embedQuery(text);
+    if (!values || values.length === 0) {
       throw new Error('Gemini returned no embedding values');
     }
     // If Gemini ever changed gemini-embedding-001's default output dimensionality, this would
@@ -51,47 +63,27 @@ export class GeminiProvider implements AIProvider {
   }
 
   /**
-   * Implements `AIProvider.generateStructuredOutput` via `@google/genai`'s JSON-mode/structured-
-   * output support: `responseMimeType: 'application/json'` plus `responseJsonSchema` (the SDK's
-   * plain-JSON-Schema alternative to its own proprietary `responseSchema` `Schema` type) built
-   * from the passed Zod `schema` with Zod 4's built-in `z.toJSONSchema()` -- no extra dependency
-   * needed for the Zod -> JSON Schema conversion (this story's "Ask First" boundary on new
-   * dependencies is satisfied by not needing one).
+   * Implements `AIProvider.generateStructuredOutput` via LangChain's standard structured-output
+   * pattern: `ChatGoogleGenerativeAI.withStructuredOutput(schema)` returns a `Runnable` whose
+   * `.invoke()` does the schema hinting (function-calling under the hood) + parse + Zod-validate
+   * in one call.
    *
-   * The SDK's own schema hinting is a *hint*, not a guarantee -- the returned JSON is always
-   * re-parsed and re-validated against `schema` here regardless, exactly as this method's
-   * interface doc comment requires. Never retries internally; a caller wanting a corrected retry
-   * (e.g. this story's citation-verification retry policy) calls this method again with a fresh
-   * prompt.
+   * LangChain's own validation is a *hint*, not a guarantee this method relies on -- the returned
+   * value is always re-parsed and re-validated against the caller's own `schema` here regardless,
+   * exactly as this method's interface doc comment requires ("never trusts LangChain's schema
+   * hinting alone"). Never retries internally; a caller wanting a corrected retry (e.g. this
+   * story's citation-verification retry policy) calls this method again with a fresh prompt.
    */
   async generateStructuredOutput<T>(params: {
     systemInstruction: string;
     prompt: string;
     schema: ZodType<T>;
   }): Promise<T> {
-    const response = await this.client.models.generateContent({
-      model: GENERATION_MODEL,
-      contents: params.prompt,
-      config: {
-        systemInstruction: params.systemInstruction,
-        responseMimeType: 'application/json',
-        responseJsonSchema: z.toJSONSchema(params.schema),
-      },
-    });
-
-    const text = response.text;
-    if (!text) {
-      throw new Error('Gemini returned no text response for a structured-output request');
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch (err) {
-      throw new Error(
-        `Gemini's structured-output response was not valid JSON: ${(err as Error).message}`,
-      );
-    }
+    const structuredModel = this.chatModel.withStructuredOutput(params.schema);
+    const raw = await structuredModel.invoke([
+      ['system', params.systemInstruction],
+      ['human', params.prompt],
+    ]);
 
     // Zod's own SafeParseReturnType (a discriminated union on `success`), narrowed on its own
     // native type -- deliberately not routed through a bespoke wrapper type of this module's own,
@@ -99,7 +91,7 @@ export class GeminiProvider implements AIProvider {
     // imported transitively, and TypeScript only narrows a *plain* discriminated union like that
     // reliably under `strictNullChecks` (this lib's own tsconfig opts into `strict: true`, but a
     // consuming app's looser config does not).
-    const result = params.schema.safeParse(parsed);
+    const result = params.schema.safeParse(raw);
     if (!result.success) {
       const errorMessage = result.error.issues
         .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
