@@ -127,7 +127,7 @@ graph TD
 | TypeORM | 1.1.0 |
 | PostgreSQL | 18.6 (pinned to major version 18 — see AD-1) |
 | pgvector | 0.8.6 (on Neon's PG18 projects; PG14–17 projects get 0.8.0 — see AD-1) |
-| LangChain.js (`langchain` / `@langchain/core`) | 1.5.10 / 1.2.8 |
+| LangChain.js (`langchain` / `@langchain/core`) | 1.5.10 / 1.2.9 (`langchain@1.5.10` requires `@langchain/core@^1.2.9` — GH-24) |
 | Zod | 4.4.3 |
 | Vercel (hosting) | Native NestJS support confirmed 2026-07-06 |
 | Neon (Postgres host) | Free tier confirmed permanent (not trial), pgvector included, verified 2026-08-24 |

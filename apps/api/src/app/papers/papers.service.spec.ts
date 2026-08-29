@@ -5,7 +5,7 @@ import { PapersService } from './papers.service';
 /** None of findAll/search/findOne touch the AIProvider boundary at all -- a fake that's never
  *  expected to be called is enough to satisfy PapersService's constructor for those tests. */
 function unusedAiProvider(): AIProvider {
-  return { generateEmbedding: jest.fn() };
+  return { generateEmbedding: jest.fn(), generateStructuredOutput: jest.fn() };
 }
 
 /**
@@ -70,6 +70,7 @@ function createServiceForSemantic(options: {
 }): { service: PapersService; aiProvider: AIProvider; query: jest.Mock } {
   const aiProvider: AIProvider = {
     generateEmbedding: jest.fn().mockResolvedValue(options.embedding ?? [0.1, 0.2, 0.3]),
+    generateStructuredOutput: jest.fn(),
   };
   const query = jest.fn().mockResolvedValue(options.rows ?? []);
   const dataSource = { query } as unknown as DataSource;
@@ -222,6 +223,7 @@ describe('PapersService', () => {
     it('propagates an embedding-provider failure as a rejected promise, never swallowing it', async () => {
       const aiProvider: AIProvider = {
         generateEmbedding: jest.fn().mockRejectedValue(new Error('GEMINI_API_KEY is not set')),
+        generateStructuredOutput: jest.fn(),
       };
       const dataSource = { query: jest.fn() } as unknown as DataSource;
       const service = new PapersService(dataSource, aiProvider);
