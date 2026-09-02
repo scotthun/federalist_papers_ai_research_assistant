@@ -2,7 +2,7 @@
 title: 'Story 5.2: Chat Persistence & Page-Aware Context'
 type: 'feature'
 created: '2026-09-02'
-status: 'done'
+status: 'in-progress'
 review_loop_iteration: 0
 followup_review_recommended: true
 context: []
@@ -37,7 +37,9 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 
 **Problem:** The quill widget's conversation (Story 5.1) already survives client-side `<Link>` navigation for free (it's mounted once at the layout level), but a hard reload or direct URL navigation loses it entirely, and the widget has no way to know it's being opened from a specific Paper Reader page — every question always searches the whole archive.
 
-**Approach:** Persist the conversation to `sessionStorage` (write-through on settle, not on every streaming token) so it survives a reload within the same tab but never a new tab. Add a small React Context, populated by a tiny client component the Paper Reader page renders, so the layout-level quill widget learns which paper (if any) is currently being read; when present, show a removable context chip and thread that paper's number into the ask request as a retrieval filter using the retrieval library's existing, already-built `paperNumber` filter option — no new filtering path.
+**Approach:** Persist the conversation to `sessionStorage` (write-through on settle, not on every streaming token) so it survives a reload within the same tab but never a new tab. Add a small React Context, populated by a tiny client component the Paper Reader page renders, so the layout-level quill widget learns which paper (if any) is currently being read; when present, show a removable context chip and tell the LLM which paper the user is reading (number + title) as prompt context — **never** a retrieval filter. Retrieval always searches the whole archive; the current paper only shapes how the LLM frames its answer, never which evidence it's allowed to draw from.
+
+> **2026-09-02 product correction:** the original version of this intent called for reusing the retrieval library's existing `paperNumber` filter (a hard `WHERE paper_number = N` before the top-K `LIMIT`) so the ask request would only ever search the current paper. After seeing it built and demoed, the product owner reconsidered: the actual goal was to give the LLM *context* about which paper is open, not to make cross-paper questions unanswerable while reading a specific paper. Confirmed with John (PM) and Sally (UX) — both agreed dropping the hard filter better serves the story's own "I don't want to repeat context" goal, and that the chip's existing copy/aria-label ("Remove paper context") already reads as context, not a scope lock, so no chip-copy change is needed. See the Spec Change Log below for what changed and what was kept.
 
 ## Boundaries & Constraints
 
@@ -45,10 +47,10 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 - Conversation persistence is `sessionStorage` only — no network/DB round trip, no `localStorage` (NFR8/NFR10). Cleared automatically on tab close; a genuinely new tab (not a duplicated/restored one — most browsers do copy `sessionStorage` when a tab is explicitly duplicated or a crashed session is restored, which is outside this AC's "closes the tab, reopens the app in a new tab" scenario) never inherits it — native `sessionStorage` scoping, no code needed for that half.
 - Persistence writes are skipped while any message has `status: 'streaming'` (checked in the same effect that would otherwise write) — only the settled state (question added, or an answer reaching `done`/`connection-lost`) triggers a `sessionStorage` write. This avoids adding a write on every streamed token, which would compound the "streaming already feels a little rough" feedback from Story 5.1.
 - On restoring from `sessionStorage` (initial mount only), any restored answer message still carrying `status: 'streaming'` is downgraded to `connection-lost` — a real reload has no fetch/reader left to resume it, so leaving it `streaming` would show a permanent cursor with nothing behind it.
-- The paper-context chip's presence and the ask request's `paperNumber` filter are the same boolean, driven by the same piece of state — never two independently-tracked flags that could drift (the AC ties them 1:1: chip visible ⇔ filter applied).
-- Dismissing the chip resets automatically the moment the *current paper* changes (including changing to "no paper" and back) — implemented as an effect keyed on the announced paper's `paperNumber`, not a value that persists across navigation. This is what makes "does not reappear while remaining on that same page" and "re-evaluates fresh" for a different paper (or the same paper revisited later) both true from one mechanism.
-- `apps/api`'s `AskController`/`AskService` gain an *optional* `paperNumber` parameter threaded straight into `retrieveRelevantChunks`'s existing `RetrieveOptions.paperNumber` (`libs/retrieval/src/lib/retrieval.ts:29`) — that option, and its filter-before-`LIMIT` SQL behavior (CAP-2/NFR6), already exists and is already tested; nothing in `libs/retrieval` changes.
-- A `paperNumber` in the request body that isn't a finite number is treated as absent (no filter, no error) — this field is client-controlled (our own quill panel), not end-user-typed, so a malformed value degrades to "search the whole archive" rather than a 400.
+- The paper-context chip's presence and the ask request's contextual note to the LLM are the same boolean, driven by the same piece of state — never two independently-tracked flags that could drift (chip visible ⇔ context sent).
+- Dismissing the chip resets automatically the moment the *current paper* changes (including changing to "no paper" and back) — implemented as a render-time state adjustment keyed on the announced paper's `paperNumber` (see Review Triage Log: this was originally a `useEffect`, patched to avoid a one-frame stale-state flash), not a value that persists across navigation. This is what makes "does not reappear while remaining on that same page" and "re-evaluates fresh" for a different paper (or the same paper revisited later) both true from one mechanism.
+- `apps/api`'s `AskController`/`AskService` gain an *optional* `{ paperNumber, paperTitle }` pair, threaded into `buildAnswerPrompt`'s prompt text as a contextual note — **never** into `retrieveRelevantChunks`'s options. `libs/retrieval`'s existing `RetrieveOptions.paperNumber` filter-before-`LIMIT` mechanism (CAP-2/NFR6) is real and already tested, but this story does not use it — retrieval for a filtered-looking request is identical to an unfiltered one.
+- A request body's `paperNumber`/`paperTitle` that don't both parse as valid (a positive integer and a non-empty trimmed string, respectively) are treated as absent (no context, no error) — these fields are client-controlled (our own quill panel), not end-user-typed, so a malformed value degrades to "no paper context" rather than a 400.
 
 **Block If:** None identified.
 
@@ -56,8 +58,10 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 - Do not persist conversation to `localStorage`, a cookie, or the backend — session-tab-scoped only (NFR10).
 - Do not add a `ChatSession`/`ChatMessage` database table — explicit non-goal carried from Epic 5's context.
 - Do not build a new client-fetchable `/api/papers/[paperNumber]` route to learn the paper's title — the Paper Reader page (a Server Component) already has the title; it's threaded to the widget via a small Context, not a second fetch.
-- Do not show the context chip, or apply any `paperNumber` filter, on the Homepage or Browse Papers — those pages render nothing that announces a current paper, so the default (no) context applies automatically.
+- Do not apply the current paper as a `retrieveRelevantChunks` filter, or otherwise restrict which paper an answer can cite while the chip is present — that was the original (corrected) design; the current paper is prompt context only.
+- Do not show the context chip, or send any paper context, on the Homepage or Browse Papers — those pages render nothing that announces a current paper, so the default (no) context applies automatically.
 - Do not persist chip-dismissal across a page reload or new tab — it's ephemeral UI state for "while I keep looking at this specific paper," not part of the conversation.
+- Do not change the chip's visible copy or its "Remove paper context" aria-label — UX review (Sally) confirmed the existing wording already reads as context, not a scope lock; only the underlying retrieval behavior changes.
 
 ## I/O & Edge-Case Matrix
 
@@ -68,12 +72,12 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 | Reload mid-stream | Reload happens while an answer's `status` was `streaming` | Restored message shows `connection-lost`, not a stuck cursor | n/a |
 | Open panel on a Paper Reader page | User opens the panel while viewing `/papers/{N}` | "📄 Federalist No. {N}" chip appears at the top of the message list, titled from that page's own data | n/a |
 | Open panel on Homepage/Browse Papers | User opens the panel from `/` or a search results page | No chip; input placeholder alone signals archive-wide scope | n/a |
-| Ask with chip present | Chip showing for paper N, user submits a question | `/api/ask` request body includes `paperNumber: N`; answer is filtered to that paper | n/a |
-| Dismiss chip, then ask | User clicks the chip's ✕, then submits a question | Chip gone; request has no `paperNumber`; searches the whole archive | n/a |
+| Ask with chip present | Chip showing for paper N, user submits a question | `/api/ask` request body includes `paperNumber`/`paperTitle`; the LLM prompt notes the user is reading that paper; retrieval still searches the whole archive and a different paper can still be cited if it's the better answer | n/a |
+| Dismiss chip, then ask | User clicks the chip's ✕, then submits a question | Chip gone; request has no `paperNumber`/`paperTitle`; no paper-context note in the prompt (retrieval scope was never affected either way) | n/a |
 | Dismiss chip, stay on same paper | Chip dismissed for paper N, user keeps browsing/asking on the same `/papers/N` | Chip does not reappear | n/a |
 | Dismiss on N, navigate to M | Chip dismissed for paper N, user clicks a citation/link to a different paper M | Chip re-evaluates fresh and appears again for M | n/a |
 | Navigate away and back to N | Chip dismissed for paper N, user goes to Browse Papers, then returns to paper N | Chip reappears (a fresh arrival at N, not a continuous "remaining on that page") | n/a |
-| `paperNumber` malformed | Request body's `paperNumber` is present but not a finite number | Treated as absent — no filter applied, no 400 | Defensive coercion in `AskController`, not a validation error |
+| `paperNumber`/`paperTitle` malformed | Request body's `paperNumber` isn't a positive integer, or `paperTitle` isn't a non-empty string (independently or together) | Treated as absent — no paper context sent to the LLM, no 400 | Defensive coercion in `AskController`, not a validation error |
 
 </intent-contract>
 
@@ -81,15 +85,16 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 
 - `apps/web/src/components/quill/quill-widget.tsx` -- add: (1) lazy `useState` initializer reading `sessionStorage` (key `quill-chat-history`) for `messages`, sanitizing any `status: 'streaming'` message to `connection-lost`; (2) a write-through `useEffect` on `messages` that skips the write while `messages.some(m => m.role === 'answer' && m.status === 'streaming')`; (3) consume `usePaperContext()` (new); (4) own `chipDismissed` boolean state with a `useEffect` keyed on `currentPaper?.paperNumber` that resets it to `false` on every change; (5) compute `activePaperContext = chipDismissed ? null : currentPaper` and pass it (plus a dismiss callback) down to `QuillPanel`.
 - `apps/web/src/components/quill/quill-launcher.tsx` -- read-only reference for the guarded-`sessionStorage`-access pattern (try/catch around `getItem`/`setItem`, lines 27-43) that the new persistence code should mirror. No edits.
-- `apps/web/src/components/quill/quill-panel.tsx` -- add a `paperContext: { paperNumber: number; title: string } | null` prop and an `onDismissPaperContext: () => void` prop; render the chip (per DESIGN.md's "Context chip" component spec) above the message list when `paperContext` is non-null; include `paperNumber: paperContext.paperNumber` in the `/api/ask` POST body (line 157's `JSON.stringify({ question: trimmedQuestion })`) when present.
+- `apps/web/src/components/quill/quill-panel.tsx` -- add a `paperContext: { paperNumber: number; title: string } | null` prop and an `onDismissPaperContext: () => void` prop; render the chip (per DESIGN.md's "Context chip" component spec) above the message list when `paperContext` is non-null; include `paperNumber: paperContext.paperNumber` and `paperTitle: paperContext.title` in the `/api/ask` POST body (line 157's `JSON.stringify({ question: trimmedQuestion })`) when present -- **product correction, 2026-09-02**: this is context for the LLM prompt, not a retrieval filter (see Spec Change Log).
 - `apps/web/src/app/api/ask/route.ts` -- **no change**: it already forwards the parsed request `body` verbatim to apps/api (`JSON.stringify(body)`), so an added `paperNumber` field passes through automatically.
 - New: `apps/web/src/components/quill/paper-context.tsx` -- `PaperContext` (React Context, default `{ currentPaper: null, setCurrentPaper: noop }` so it's safe with no provider ancestor in tests), `PaperContextProvider` (holds `currentPaper` state), `usePaperContext()` hook.
 - New: `apps/web/src/components/quill/announce-paper-context.tsx` -- `'use client'` component `AnnouncePaperContext({ paperNumber, title })`; on mount/paperNumber-or-title change calls `setCurrentPaper({ paperNumber, title })`, clears (`setCurrentPaper(null)`) on unmount. Kept as its own file because the Reader page itself is an async Server Component and can't carry a `'use client'` directive.
 - `apps/web/src/app/layout.tsx` -- wrap `{children}` and `<QuillWidget />` together in the new `<PaperContextProvider>` (currently just renders them as plain siblings inside `<body>`, lines 16-21).
 - `apps/web/src/app/papers/[paperNumber]/page.tsx` -- in `PaperReaderPage`'s success branch (line 152, alongside `<PaperReader paper={result.paper} highlight={highlight} />`), render `<AnnouncePaperContext paperNumber={result.paper.paperNumber} title={result.paper.title} />`.
-- `apps/api/src/app/ask/ask.controller.ts` -- add `paperNumber?: unknown` to `AskRequestBody` (line 8-10); in `ask()` (line 33), coerce it (`typeof body?.paperNumber === 'number' && Number.isFinite(...)`, else `undefined`) and pass as a second argument: `this.askService.ask(trimmedQuestion, paperNumber)`.
-- `apps/api/src/app/ask/ask.service.ts` -- `AskService.ask` (line 164) gains an optional `paperNumber?: number` second parameter, forwarded into the existing `retrieveRelevantChunks(..., { topK: TOP_K, paperNumber })` call (line 177-179).
-- `libs/retrieval/src/lib/retrieval.ts` -- read-only reuse; `RetrieveOptions.paperNumber` (line 29) and its filter-before-`LIMIT` SQL already exist and are already tested by `libs/retrieval`'s own specs. No edits.
+- `apps/api/src/app/ask/ask.controller.ts` -- add `paperNumber?: unknown`/`paperTitle?: unknown` to `AskRequestBody` (line 8-10); in `ask()` (line 33), coerce both (`Number.isInteger(body.paperNumber) && body.paperNumber > 0`; `typeof body.paperTitle === 'string'` non-empty after trim) -- only when **both** are valid, build a `currentPaper: { paperNumber, title }` object, else `undefined` -- and pass as a second argument: `this.askService.ask(trimmedQuestion, currentPaper)`.
+- `apps/api/src/app/ask/ask.service.ts` -- `AskService.ask` (line 164) gains an optional `currentPaper?: { paperNumber: number; title: string }` second parameter, threaded through `resolveOutcome`/`answerConfidently`/`tryGenerate` into `buildAnswerPrompt`'s new parameter (below) -- **not** into `retrieveRelevantChunks`'s options, which stays exactly `{ topK: TOP_K }` (product correction, 2026-09-02 -- the original version of this line threaded it into the retrieval filter instead; see Spec Change Log).
+- `apps/api/src/app/ask/answer-prompt.ts` -- `buildAnswerPrompt` (line 42) gains an optional fourth parameter `currentPaper?: { paperNumber: number; title: string }`; when present, prepend a short contextual note to the prompt (e.g. "The user is currently reading Federalist No. {N}: \"{title}\". This is context only -- you may still answer using evidence from any paper if that's the better answer.") before the `QUESTION:` line.
+- `libs/retrieval/src/lib/retrieval.ts` -- read-only reuse of `RetrieveOptions`/`retrieveRelevantChunks`, unchanged; this story deliberately does not call its `paperNumber` filter option at all.
 - `apps/web/src/app/global.css` -- reuse existing `--color-quill-surface-chip`/`--color-quill-accent-gold`/`--color-quill-ink-secondary` tokens (already added in Story 5.1) for the chip; no new tokens expected.
 - `apps/web/specs/components/quill/quill-widget.spec.tsx` -- extend with persistence (write-skipped-while-streaming, restore-and-sanitize-on-mount) and chip-dismissal-reset-on-paper-change cases.
 - New: `apps/web/specs/components/quill/paper-context.spec.tsx` -- covers `PaperContextProvider`/`usePaperContext()` defaults and updates, and `AnnouncePaperContext`'s mount/update/unmount behavior together (tightly coupled, kept in one file).
@@ -105,21 +110,37 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 - `apps/web/src/app/layout.tsx` -- wrap `{children}` + `<QuillWidget />` in `<PaperContextProvider>` -- makes the context available to both the announcer (inside `children`) and the widget (its sibling).
 - `apps/web/src/app/papers/[paperNumber]/page.tsx` -- render `<AnnouncePaperContext>` alongside `<PaperReader>` -- the one place a paper is known to be "currently being read."
 - `apps/web/src/components/quill/quill-widget.tsx` -- add `sessionStorage` read (with streaming-status sanitization) on init and a skip-while-streaming write-through effect for `messages`; consume `usePaperContext()`; add `chipDismissed` state reset-on-paper-change; compute and pass down `activePaperContext` + dismiss callback -- the persistence and page-awareness both live where `messages`/`isOpen` already live, consistent with Story 5.1's "one owner" design.
-- `apps/web/src/components/quill/quill-panel.tsx` -- accept and render the context chip from the new props; include `paperNumber` in the ask request body when present -- keeps `QuillPanel` presentational (per Story 5.1's split) while still surfacing/using the new state.
-- `apps/api/src/app/ask/ask.controller.ts` -- accept and coerce an optional `paperNumber`, pass to `AskService.ask` -- the request-validation boundary, same role it already plays for `question`.
-- `apps/api/src/app/ask/ask.service.ts` -- thread `paperNumber` into the existing `retrieveRelevantChunks` options -- the one call site that already supports this filter.
+- `apps/web/src/components/quill/quill-panel.tsx` -- accept and render the context chip from the new props; include `paperNumber`/`paperTitle` in the ask request body when present -- keeps `QuillPanel` presentational (per Story 5.1's split) while still surfacing/using the new state.
+- `apps/api/src/app/ask/ask.controller.ts` -- accept and coerce an optional `{ paperNumber, paperTitle }` pair, pass to `AskService.ask` -- the request-validation boundary, same role it already plays for `question`.
+- `apps/api/src/app/ask/ask.service.ts` -- thread the current paper into `buildAnswerPrompt`, **not** into `retrieveRelevantChunks`'s options.
+- `apps/api/src/app/ask/answer-prompt.ts` -- accept the current paper and prepend a contextual note to the prompt when present.
 - Unit-test every I/O Matrix row (see specs listed in Code Map).
 
 **Acceptance Criteria:**
 - Given an existing conversation in the current tab, when the user reloads or navigates by URL, then the chat history remains present next time the panel is opened, with no network/database round trip.
 - Given the user closes the tab and reopens the app in a new tab, then no prior chat history is restored.
 - Given the panel opened on a Paper Reader page, when it renders, then a removable "📄 Federalist No. {N}" context chip appears, pre-filled with that paper's title.
-- Given the context chip is present, when a question is submitted, then the request includes that paper's `paperNumber` as a retrieval filter, reusing the existing filter-before-limit mechanism.
-- Given the context chip is present, when the user clicks its ✕, then the chip is removed, the next question searches the whole archive, and the chip does not reappear while the user remains on that same Paper Reader page.
+- Given the context chip is present, when a question is submitted, then the request tells the LLM the user is reading that paper (number + title) as prompt context only; retrieval still searches the whole archive and a different paper can still be cited when it's the better answer.
+- Given the context chip is present, when the user clicks its ✕, then the chip is removed, the next question no longer includes that paper context, and the chip does not reappear while the user remains on that same Paper Reader page.
 - Given the chip was removed while reading paper N, when the user navigates to a different Paper Reader (paper M), then the chip re-evaluates fresh and appears again for M.
 - Given the panel is opened from the Homepage or Browse Papers, then no context chip appears.
 
 ## Spec Change Log
+
+### 2026-09-02 — Product correction: context, not a retrieval filter
+
+**Triggering finding:** After the first implementation shipped and was demoed, the product owner reconsidered the original AC's choice to apply the current paper as a hard `paperNumber` retrieval filter (reusing `libs/retrieval`'s existing filter-before-limit mechanism). Pulse-checked with John (PM) and Sally (UX): both agreed a hard filter works against the story's own stated goal ("so I don't ... have to repeat context") by making a genuinely cross-paper question unanswerable while the chip is present — a strictly worse outcome than doing nothing.
+
+**What was amended:** `docs/planning/epics.md`'s Story 5.2 AC and this spec's Intent/Boundaries/I/O Matrix/Code Map/Tasks were rewritten so the current paper is threaded into the LLM prompt as contextual framing (`buildAnswerPrompt` gains a `currentPaper` parameter) instead of into `retrieveRelevantChunks`'s options. `apps/api`'s `AskController`/`AskService` now carry `{ paperNumber, paperTitle }` end-to-end to the prompt builder rather than to the retrieval filter. `docs/implementation/epic-5-context.md`'s matching bullet was also corrected.
+
+**Known-bad state avoided:** Shipping (or leaving shipped) a chip that silently makes the archive-wide assistant answer only from one paper while reading it — directly contradicting the product owner's actual intent and, per UX review, misleading given the chip's own "remove paper context" framing.
+
+**KEEP -- preserved unchanged, re-derive around these:**
+- The `sessionStorage` persistence mechanism (write-through skipped while streaming, restore-with-shape-validation, `connection-lost` downgrade) -- entirely unrelated to this correction, do not touch.
+- The `PaperContext`/`PaperContextProvider`/`usePaperContext`/`AnnouncePaperContext` mechanism for learning the current paper -- unchanged; only what the widget *does* with that value on the ask request changes.
+- The chip's rendering, visible copy, and `aria-label="Remove paper context"` -- UX review confirmed these already read as context, not a scope lock; do not reword.
+- The chip-dismissal-resets-on-paper-change mechanism (the render-time state adjustment, not the earlier `useEffect` version already patched out in the prior review pass) -- unchanged; dismissal still means "don't send this paper's context," just no longer "don't filter by it."
+- All of Story 5.1's untouched surfaces (streaming, citation verification, citation navigation) -- this correction only touches the current-paper-context plumbing.
 
 ## Review Triage Log
 
@@ -159,7 +180,7 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 - `npx nx build web` -- expected: production build succeeds.
 
 **Manual checks (if no CLI):**
-- Ask a question, reload the tab, reopen the panel, confirm the conversation is still there; open the app in a brand-new tab and confirm it's empty. Open the panel on a Paper Reader page, confirm the chip appears with the right title, dismiss it, ask a question, confirm (via network tab) no `paperNumber` was sent; navigate to a different paper via a citation and confirm the chip reappears.
+- Ask a question, reload the tab, reopen the panel, confirm the conversation is still there; open the app in a brand-new tab and confirm it's empty. Open the panel on a Paper Reader page, confirm the chip appears with the right title, ask a question that's actually best answered by a *different* paper, and confirm the answer still cites that other paper (proving there's no hard filter); dismiss the chip, ask a question, confirm (via network tab) no `paperNumber`/`paperTitle` was sent; navigate to a different paper via a citation and confirm the chip reappears.
 
 ## Auto Run Result
 
