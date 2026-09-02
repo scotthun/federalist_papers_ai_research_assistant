@@ -334,6 +334,92 @@ describe('Paper Reader page', () => {
     expect(backLink.getAttribute('href')).toBe('/?q=checks%20%26%20balances');
   });
 
+  it('tags the paragraph matching a highlight searchParam with id="cited-passage" and a highlight class', async () => {
+    const paper: PaperDetail = {
+      paperNumber: 51,
+      title: 'The Structure of the Government Must Furnish the Proper Checks and Balances',
+      authors: ['Hamilton', 'Madison'],
+      fullText: 'Paragraph one.\n\nAmbition must be made to counteract ambition.\n\nParagraph three.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed51.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    render(
+      await Page({
+        params: paramsFor('51'),
+        searchParams: Promise.resolve({
+          highlight: 'Ambition must be made to counteract ambition.',
+        }),
+      }),
+    );
+
+    const highlighted = document.getElementById('cited-passage');
+    expect(highlighted).not.toBeNull();
+    expect(highlighted?.textContent).toBe('Ambition must be made to counteract ambition.');
+    expect(highlighted?.className).toContain('bg-quill-surface-highlight');
+  });
+
+  it('matches a highlight value against a whitespace-normalized paragraph (not requiring an exact match)', async () => {
+    const paper: PaperDetail = {
+      paperNumber: 51,
+      title: 'The Structure of the Government Must Furnish the Proper Checks and Balances',
+      authors: ['Hamilton', 'Madison'],
+      fullText: 'Paragraph one.\n\nAmbition   must be\nmade to counteract ambition.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed51.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    render(
+      await Page({
+        params: paramsFor('51'),
+        searchParams: Promise.resolve({
+          highlight: 'Ambition must be made to counteract ambition.',
+        }),
+      }),
+    );
+
+    expect(document.getElementById('cited-passage')).not.toBeNull();
+  });
+
+  it('renders normally with no highlight applied when highlight is absent', async () => {
+    const paper: PaperDetail = {
+      paperNumber: 1,
+      title: 'General Introduction',
+      authors: ['Hamilton'],
+      fullText: 'Paragraph one.\n\nParagraph two.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed01.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    render(await Page({ params: paramsFor('1') }));
+
+    expect(document.getElementById('cited-passage')).toBeNull();
+  });
+
+  it('renders normally with no highlight applied when highlight matches no paragraph', async () => {
+    const paper: PaperDetail = {
+      paperNumber: 1,
+      title: 'General Introduction',
+      authors: ['Hamilton'],
+      fullText: 'Paragraph one.\n\nParagraph two.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed01.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    render(
+      await Page({
+        params: paramsFor('1'),
+        searchParams: Promise.resolve({
+          highlight: 'this text does not appear anywhere in the paper',
+        }),
+      }),
+    );
+
+    expect(document.getElementById('cited-passage')).toBeNull();
+    expect(screen.getByText('Paragraph one.')).toBeTruthy();
+    expect(screen.getByText('Paragraph two.')).toBeTruthy();
+  });
+
   it('renders a clear error state when paperNumber is NaN', async () => {
     mockFetchResolved({
       ok: true,
