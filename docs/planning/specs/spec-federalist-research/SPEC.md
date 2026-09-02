@@ -10,6 +10,8 @@ companions:
   - ../research/technical-federalist-papers-ingestion-source-2026-08-24/research.md
   - ../research/technical-rag-confidence-tiering-2026-08-24/research.md
   - ../architecture/architecture-federalist_papers_ai_research_assistant-2026-08-24/ARCHITECTURE-SPINE.md
+  - ../../ux-designs/ux-federalist_papers_ai_research_assistant-2026-08-29/DESIGN.md
+  - ../../ux-designs/ux-federalist_papers_ai_research_assistant-2026-08-29/EXPERIENCE.md
 sources:
   - ../draft-spec.md
 ---
@@ -52,6 +54,14 @@ A vision to realize, doubling as a portfolio artifact: a small, polished RAG-bas
   - **intent:** A user can follow a link from any paper to its authoritative original source to independently verify the text, without relying on the app itself.
   - **success:** Every `FederalistPaper` row has a non-null, resolvable `sourceUrl`; the link is visibly present as a quiet tag near the paper title in the reader (see `ui-design.md`).
 
+- **CAP-8: Persistent multi-question session**
+  - **intent:** A user can ask multiple independent questions in a row via the quill chat widget, with visible history preserved across page navigation within the same browser tab, optionally scoped to the paper currently being read.
+  - **success:** Chat history remains visible after navigating to a different page in the same tab and is cleared on tab close (sessionStorage only — see `decisions.md`); a question asked while viewing a specific paper's reader page defaults to filtering retrieval to that paper via a removable context chip.
+
+- **CAP-9: Streaming answer delivery**
+  - **intent:** A confident-tier answer's prose streams to the client token-by-token instead of arriving as one blocking response.
+  - **success:** For confident-tier responses, partial text reaches the client before generation completes; citations attach only after the full response completes and passes existing server-side citation verification (CAP-5) — never a speculative or unverified per-token citation. Clarify/refuse tiers are unaffected (already instant, no LLM call).
+
 ## Constraints
 
 - Postgres + pgvector only for vector search — no separate vector database. The point of the project is demonstrating vector search living alongside relational data in one system.
@@ -64,7 +74,9 @@ A vision to realize, doubling as a portfolio artifact: a small, polished RAG-bas
 - `chunkId` is ephemeral — valid only within its originating request/response cycle, never persisted, bookmarked, or shared as a stable identifier, since re-ingestion deletes and recreates `DocumentChunk` rows.
 - Retrieval filters (`paperNumber`/`author`) must apply in the SQL `WHERE` clause before the top-K `LIMIT`, never applied post-hoc on an already-limited result set.
 - An AI provider abstraction (`generateAnswer`/`generateStructuredOutput`/`generateEmbedding`) is mandatory — application code never depends directly on a single provider's SDK.
-- Rate limiting: a per-IP throttle is required at MVP; a global daily cap on AI-backed requests is designed but deferred past MVP. No Redis needed at this project's single-process scale. See `decisions.md`.
+- Rate limiting: a per-IP throttle is required at MVP; a global daily cap on AI-backed requests is designed but deferred past MVP. No Redis needed at this project's single-process scale. See `decisions.md`. Every chat message counts as one request against these same counters, identical to a single-shot ask — no discount for messages within a conversation.
+- Chat conversation state is client-side only (`sessionStorage`), never persisted server-side or in the database — consistent with no auth/user accounts (NFR1). Each chat message is a fully independent, stateless request to the ask endpoint; the backend holds no conversational memory.
+- Page-aware context scoping (the chat's paper-context chip) reuses the existing `paperNumber` retrieval filter (CAP-2/NFR6) — not a new filtering mechanism.
 
 ## Non-goals
 
@@ -76,6 +88,7 @@ A vision to realize, doubling as a portfolio artifact: a small, polished RAG-bas
 - Elasticsearch or any separate vector database.
 - Kubernetes, self-managed cloud infrastructure, or custom DevOps/CI pipelines; mobile application. (A managed PaaS deploy target for the live demo — e.g. Vercel + a managed Postgres host — is in scope; see `decisions.md`, "Deployment target." The original intent was "no infra to operate," not "no hosting at all.")
 - AI-driven UI generation — the app is a librarian pointing to documents, never an editor generating or altering the reading experience (see `decisions.md`, "librarian vs. editor").
+- Server-side conversational memory or multi-turn context resolution (e.g. resolving "what about him?" against a prior turn) — each chat message must be self-contained. Deliberately deferred to keep scope minimal given no auth/user accounts to hang a persisted session on.
 
 ## Success signal
 
