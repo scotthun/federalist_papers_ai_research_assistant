@@ -1,0 +1,62 @@
+<!--
+Key screen: Desktop quill popup, mid-stream, with removable page-aware context chip.
+Illustrates: EXPERIENCE.md Component Patterns ("Chat panel", "Context chip", "Citation"),
+State Patterns ("Streaming", "Page-aware context present"), Key Flow 2 (page-aware follow-up).
+DESIGN.md tokens: components.chat-panel (dog-eared radius), components.context-chip,
+components.citation-link (surface-highlight + accent), components.answer-bubble / question-bubble,
+typography.chat / typography.caption, colors.accent-gold (panel border), colors.inverse-surface (header).
+Governing spine sections: EXPERIENCE.md §Component Patterns, §State Patterns, §Key Flows (Flow 2).
+Real content: question/answer text and context chip label carried over verbatim from
+.working/direction-parchment-manuscript.html and .memlog.md decisions.
+-->
+<div style="font-family: Georgia, 'Times New Roman', serif; background:#fdfaf3; min-height: 640px; position: relative; padding: 24px;">
+
+  <div style="max-width:760px; margin:0 auto; opacity:0.35;">
+    <h1 style="font-size:22px; color:#3a2f24; margin:0 0 4px;">Federalist No. 10 — The Union as a Safeguard Against Domestic Faction and Insurrection</h1>
+    <p style="font-size:12px; color:#a08a68;">Madison — page dimmed behind the popup for illustration only; in product the page stays fully interactive.</p>
+  </div>
+
+  <!-- Popup chat panel -->
+  <div style="position:absolute; right:24px; bottom:24px; width:340px; background:#fbf6ea; border:1px solid #c9a227; border-radius:10px 10px 4px 10px; box-shadow:0 8px 24px rgba(58,47,36,0.35); overflow:hidden;">
+
+    <div style="background:#2f2418; color:#f4ecd8; padding:10px 14px; display:flex; align-items:center; justify-content:space-between;">
+      <span style="font-size:13px; letter-spacing:0.4px;">🪶 Ask the Archive</span>
+      <span style="font-size:16px; opacity:0.7;">—</span>
+    </div>
+
+    <!-- page-aware context chip -->
+    <div style="padding:10px 14px 0;">
+      <span style="display:inline-flex; align-items:center; gap:6px; background:#f0e6cc; border:1px solid #c9a227; color:#6b4f3b; font-size:11px; padding:3px 8px; border-radius:12px;">
+        📄 Federalist No. 10
+        <span style="opacity:0.6; cursor:pointer;">✕</span>
+      </span>
+    </div>
+
+    <div style="padding:12px 14px; max-height:280px; overflow:hidden;">
+
+      <!-- user question -->
+      <div style="display:flex; justify-content:flex-end; margin-bottom:12px;">
+        <div style="background:#eee3cb; border-radius:10px 10px 2px 10px; padding:8px 12px; font-size:13px; max-width:85%; line-height:1.5; color:#3a2f24;">
+          What does Madison argue about factions in Federalist No. 10?
+        </div>
+      </div>
+
+      <!-- streaming answer -->
+      <div style="display:flex; margin-bottom:4px;">
+        <div style="background:#ffffff; border:1px solid #e6dcc0; border-radius:10px 10px 10px 2px; padding:10px 12px; font-size:13px; line-height:1.5; max-width:92%; color:#3a2f24;">
+          Madison argues that factions are sown into the nature of liberty itself &mdash; to remove them would be to abolish freedom, "a remedy worse than the disease." Instead, a large republic controls their effects by
+          <span style="background:#f6e7c9; border-bottom:1px dotted #8a1f1f; color:#8a1f1f; cursor:pointer; font-weight:600;">diluting factional influence across many representatives and interests</span><sup style="color:#8a1f1f; font-weight:700;">[1]</sup>
+          <span style="display:inline-block; width:2px; height:13px; background:#3a2f24; margin-left:2px; vertical-align:text-bottom;"></span>
+        </div>
+      </div>
+      <div style="font-size:11px; color:#a08a68; margin-left:4px;">streaming…</div>
+
+    </div>
+
+    <div style="border-top:1px solid #e6dcc0; padding:8px 12px; display:flex; gap:8px; align-items:center;">
+      <div style="flex:1; border:1px solid #d8cba8; border-radius:14px; padding:6px 12px; font-size:12px; color:#a08a68; background:#fff;">Ask a question of the Papers…</div>
+      <span style="color:#8a1f1f; font-size:15px;">➤</span>
+    </div>
+  </div>
+
+</div>

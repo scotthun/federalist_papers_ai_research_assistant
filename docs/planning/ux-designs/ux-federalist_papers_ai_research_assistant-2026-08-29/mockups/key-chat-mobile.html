@@ -1,0 +1,52 @@
+<!--
+Key screen: Mobile full-screen quill takeover (< md breakpoint), mid-stream.
+Illustrates: EXPERIENCE.md §Responsive & Platform ("< md ... full-screen"), §Key Flows (Flow 3,
+mobile research session), §Component Patterns "Chat panel" full-screen variant (square corners —
+no dog-ear, since it owns the whole viewport per DESIGN.md §Components).
+DESIGN.md tokens: colors.inverse-surface header, colors.surface-panel body, typography.chat,
+components.answer-bubble / question-bubble, colors.accent citation styling.
+Real content: same question/answer pair as key-chat-popup.html, reflowed full-width, no context
+chip (opened from Homepage in this composition, matching Flow 3 step 2).
+-->
+<div style="font-family: Georgia, 'Times New Roman', serif; display:flex; justify-content:center; background:#fdfaf3; padding:24px;">
+
+  <!-- phone frame -->
+  <div style="width:375px; height:667px; border:10px solid #2f2418; border-radius:36px; overflow:hidden; box-shadow:0 8px 24px rgba(58,47,36,0.35); display:flex; flex-direction:column; background:#fbf6ea;">
+
+    <div style="background:#2f2418; color:#f4ecd8; padding:16px 16px 14px; display:flex; align-items:center; justify-content:space-between;">
+      <span style="font-size:15px; letter-spacing:0.4px;">🪶 Ask the Archive</span>
+      <span style="font-size:20px; opacity:0.8;">‹</span>
+    </div>
+
+    <div style="flex:1; padding:16px; overflow:hidden;">
+
+      <!-- user question -->
+      <div style="display:flex; justify-content:flex-end; margin-bottom:14px;">
+        <div style="background:#eee3cb; border-radius:12px 12px 2px 12px; padding:10px 14px; font-size:14px; max-width:85%; line-height:1.5; color:#3a2f24;">
+          What arguments does Madison make about factions?
+        </div>
+      </div>
+
+      <!-- streaming answer -->
+      <div style="display:flex; margin-bottom:4px;">
+        <div style="background:#ffffff; border:1px solid #e6dcc0; border-radius:12px 12px 12px 2px; padding:12px 14px; font-size:14px; line-height:1.6; max-width:95%; color:#3a2f24;">
+          Madison argues that factions are sown into the nature of liberty itself &mdash; to remove them would be to abolish freedom, "a remedy worse than the disease." Instead, a large republic controls their effects by
+          <span style="background:#f6e7c9; border-bottom:1px dotted #8a1f1f; color:#8a1f1f; cursor:pointer; font-weight:600;">diluting factional influence across many representatives and interests</span><sup style="color:#8a1f1f; font-weight:700;">[1]</sup>
+          <span style="display:inline-block; width:2px; height:14px; background:#3a2f24; margin-left:2px; vertical-align:text-bottom;"></span>
+        </div>
+      </div>
+      <div style="font-size:11px; color:#a08a68; margin-left:4px; margin-top:6px;">streaming…</div>
+
+    </div>
+
+    <div style="border-top:1px solid #e6dcc0; padding:12px 16px; display:flex; gap:10px; align-items:center; background:#fbf6ea;">
+      <div style="flex:1; border:1px solid #d8cba8; border-radius:16px; padding:9px 14px; font-size:14px; color:#a08a68; background:#fff;">Ask a question of the Papers…</div>
+      <span style="color:#8a1f1f; font-size:18px;">➤</span>
+    </div>
+  </div>
+
+  <div style="align-self:flex-end; margin-left:16px; font-size:11px; color:#a08a68; max-width:160px;">
+    &lt; md breakpoint: panel owns the full viewport; corners square (no dog-ear) since there is no page edge to peel from.
+  </div>
+
+</div>

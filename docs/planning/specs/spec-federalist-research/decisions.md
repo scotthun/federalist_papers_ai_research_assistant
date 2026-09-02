@@ -58,6 +58,20 @@ Why: Avalon's pages have no internal anchors (confirmed by inspecting the raw HT
 
 **Vercel** (both `apps/web` and `apps/api`, the API via Vercel's native NestJS serverless support) + **Neon** (Postgres+pgvector). Chosen for genuinely free, no-card-on-file hosting (see architecture spine `AD-1`, `docs/planning/architecture/architecture-federalist_papers_ai_research_assistant-2026-08-24/ARCHITECTURE-SPINE.md`) — full evaluation of hosting options happened during architecture coaching, not spec-time, which is why it's cross-referenced here rather than re-derived. This decision *amends* the rate-limiting decision below: it was written assuming a single always-on process, which serverless does not provide.
 
+## Quill chat widget: streaming, statelessness, persistence
+
+Surfaced by the finalized `bmad-ux` run (`../ux-designs/ux-federalist_papers_ai_research_assistant-2026-08-29/`) that redesigns the ask flow as a floating quill-icon chat widget (CAP-8, CAP-9).
+
+**Stateless per message.** Each chat message is sent to the existing ask endpoint independently, exactly like today's single-shot Ask the Archive request — no server-side conversational memory, no follow-up-question resolution ("what about him?" won't resolve against a prior turn). Chosen over true conversational RAG specifically because there's no auth/user accounts (NFR1) to hang a persisted server-side session on, and the project's own scope-discipline principle (see `SPEC.md`, "Why") argues against the added complexity — a new companion for history truncation/summarization, and per-turn interaction with confidence tiering and citation verification — for a portfolio-scale project.
+
+**Client-side history only.** Chat history lives in the browser's `sessionStorage`, not `localStorage` and not a cookie: it needs to persist across page navigation within a tab (matches the UX decision that history survives navigating Browse Papers ↔ Paper Reader) but should clear on tab close rather than linger indefinitely with no server-side way to ever clean it up. A cookie was rejected outright — it would round-trip on every request for something that's purely client-display, and cookie size limits would be hit by a growing transcript.
+
+**Streaming stops at the citation boundary.** The confident tier's answer prose streams token-by-token, but citations attach only once the full response completes and passes the existing server-side citation-verification check (CAP-5) — streaming cannot be allowed to leak an unverified citation mid-response, since verification is the actual safety net (see "Citation verification" above). Clarify/refuse tiers stay instant since they're already template-generated with no LLM call — nothing to stream.
+
+**Page-context filter reuses CAP-2's mechanism.** When the chat's removable "📄 Federalist No. N" context chip is present, the ask endpoint receives the same `paperNumber` filter search already applies (NFR6: filter-before-limit) — not a new filtering mechanism. Removing the chip clears the filter and the question searches the whole archive again.
+
+**Rate limiting is unchanged per message.** Every chat message still counts as one request against the existing per-IP/global-daily Postgres-backed counters (NFR5) — no special-casing for "it's part of a conversation." The limit exists to bound cost exposure per AI-backed call, and a multi-turn conversation is still N individual AI-backed calls.
+
 ## Rate limiting / cost exposure
 
 Principle 8 rules out authentication, but the ask endpoint calls a paid or free-tier-metered AI provider (OpenRouter or a free Google Gemini key — provider undecided, doesn't change this design) with no per-user identity to gate on. Two limits, defending against different things:

@@ -1,0 +1,44 @@
+<!--
+Key screen: Paper Reader after a citation click from the quill — quill collapsed, quoted passage
+shown above the full text, verification tag near the title.
+Illustrates: EXPERIENCE.md §Component Patterns ("Citation" navigation rule, "Verification tag"),
+§State Patterns ("Citation clicked"), §Key Flows (Flow 1 climax step 6).
+DESIGN.md tokens: colors.surface-raised (quoted-passage panel — "paper-white reserved for answer
+bubble + quoted passage"), typography.reading (full text), typography.caption + colors.ink-muted
+(verification tag), colors.launcher-fill (collapsed quill, unchanged from key-home.html).
+Real content: quoted passage and full-text opening carried over from the pre-existing
+citation-clicked.png screenshot (Story 3.3, already implemented) — this mock re-skins that existing
+behavior in the parchment-manuscript direction, it does not invent new layout.
+-->
+<div style="font-family: Georgia, 'Times New Roman', serif; background:#fdfaf3; min-height: 640px; padding: 0; position: relative;">
+
+  <div style="max-width: 760px; margin: 0 auto; padding: 40px 24px 24px;">
+
+    <h1 style="font-size:22px; font-weight:400; color:#3a2f24; margin:0 0 2px;">No. 10 — The Union as a Safeguard Against Domestic Faction and Insurrection</h1>
+    <p style="font-size:13px; color:#6b4f3b; margin:0 0 4px;">Madison</p>
+    <p style="font-size:11px; color:#a08a68; margin:0 0 24px;">Source: Avalon Project ↗</p>
+
+    <!-- quoted passage, paper-white, above the full text -->
+    <div style="background:#ffffff; border:1px solid #e6dcc0; border-radius:8px; padding:16px 20px; margin-bottom:24px;">
+      <div style="font-size:11px; color:#a08a68; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.05em;">Cited passage</div>
+      <div style="font-size:15px; line-height:1.7; color:#3a2f24; font-style:italic;">
+        "...by diluting factional influence across many representatives and interests, by a majority of the whole society; and there being thus less danger to a minority from the will of a majority."
+      </div>
+    </div>
+
+    <!-- full text -->
+    <div style="font-size:16px; line-height:1.7; color:#3a2f24;">
+      To the People of the State of New York:<br /><br />
+      AMONG the numerous advantages promised by a well-constructed Union, none deserves to be more accurately developed than its tendency to break and control the violence of faction. The friend of popular governments never finds himself so much alarmed for their character and fate, as when he contemplates their propensity to this dangerous vice...
+    </div>
+  </div>
+
+  <!-- quill collapsed after citation click -->
+  <div style="position:absolute; right:32px; bottom:32px; text-align:center;">
+    <div style="width:56px; height:56px; border-radius:50%; background:radial-gradient(circle at 30% 30%, #4a3a28, #2f2418); box-shadow: 0 0 0 6px rgba(201,162,39,0.25), 0 3px 8px rgba(0,0,0,0.3); display:flex; align-items:center; justify-content:center; margin:0 auto;">
+      <span style="font-size:26px; transform:rotate(-40deg); display:inline-block;">🪶</span>
+    </div>
+    <div style="font-size:10px; color:#a08a68; margin-top:6px;">collapsed post-navigation — history preserved</div>
+  </div>
+
+</div>
