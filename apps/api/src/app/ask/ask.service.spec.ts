@@ -425,41 +425,91 @@ describe('AskService', () => {
     });
   });
 
-  // Story 5.2: an optional paperNumber, forwarded into retrieveRelevantChunks's options and, from
-  // there, into the SQL bound parameters `dataSource.query` receives -- proving it actually
-  // reached the existing filter-before-LIMIT mechanism (libs/retrieval's own specs cover the SQL
-  // correctness itself, not re-tested here).
-  describe('paperNumber filter (Story 5.2)', () => {
-    it('includes paperNumber among the bound SQL parameters specifically because the filter was applied, not coincidentally', async () => {
-      // `toContain(51)` alone could pass vacuously if some unrelated parameter (e.g. topK)
-      // happened to also be 51 -- calling the same service/mocked dataSource once *without* the
-      // filter establishes a baseline params array, so the filtered call's extra `51` entry is
-      // provably attributable to `paperNumber`, not a coincidence.
+  // Story 5.2 (product-corrected 2026-09-02): `currentPaper` is prompt context for the LLM only
+  // -- it must reach `buildAnswerPrompt`'s prompt text, and it must NOT reach
+  // `retrieveRelevantChunks`'s SQL. The original version of this story threaded it into the
+  // retrieval filter instead (reverted per the spec's Spec Change Log); the product owner
+  // reconsidered because a hard filter made a genuinely cross-paper question unanswerable while
+  // the chip was showing.
+  describe('currentPaper prompt context (Story 5.2)', () => {
+    it('includes the current paper as a contextual note in the prompt sent to the LLM', async () => {
       const aiProvider = fakeAiProvider();
-      const { service, query } = buildService(
-        [fakeRow({ chunkId: 'chunk-1', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 })],
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Ambition must be made to counteract ambition.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
         aiProvider,
       );
 
-      await service.ask('Why checks and balances?');
-      const [, baselineParams] = query.mock.calls[0];
-      expect(baselineParams).not.toContain(51);
+      await service.ask('Why checks and balances?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
 
-      await service.ask('Why checks and balances?', 51);
-      const [, filteredParams] = query.mock.calls[1];
-
-      expect(filteredParams).toContain(51);
-      expect(filteredParams.length).toBe(baselineParams.length + 1);
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).toContain('Federalist No. 10');
+      expect(call.prompt).toContain('The Same Subject Continued');
+      // The note must read as context, not a restriction -- proving this isn't a regression back
+      // toward "only answer from this paper."
+      expect(call.prompt).toContain('context only');
     });
 
-    it('does not add a paperNumber bound parameter when omitted', async () => {
+    it('omits any paper-context note from the prompt when currentPaper is absent', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Ambition must be made to counteract ambition.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?');
+
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).not.toContain('currently reading');
+    });
+
+    it('carries the paper-context note through to the one allowed retry prompt too', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockResolvedValueOnce({
+          answer: 'A fabricated answer.',
+          citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
+        })
+        .mockResolvedValueOnce({
+          answer: 'The corrected, grounded answer.',
+          citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+        });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+      const retryCall = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[1][0];
+      expect(retryCall.prompt).toContain('Federalist No. 10');
+    });
+
+    it('never adds a paperNumber bound SQL parameter, even when currentPaper is provided', async () => {
       const aiProvider = fakeAiProvider();
       const { service, query } = buildService(
         [fakeRow({ chunkId: 'chunk-1', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 })],
         aiProvider,
       );
 
-      await service.ask('Why checks and balances?');
+      await service.ask('Why checks and balances?', {
+        paperNumber: 51,
+        title: 'The Structure of the Government',
+      });
 
       expect(query).toHaveBeenCalledTimes(1);
       const [, params] = query.mock.calls[0];

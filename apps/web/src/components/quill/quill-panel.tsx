@@ -168,10 +168,16 @@ export function QuillPanel({
         headers: { 'Content-Type': 'application/json' },
         // paperContext (if present) is the same boolean/value that drove the chip's visibility
         // when this question was submitted (Story 5.2's Boundaries) -- included only when
-        // non-null, so a dismissed/absent context never sends a stray paperNumber.
+        // non-null, so a dismissed/absent context never sends a stray paperNumber/paperTitle.
+        // apps/api threads this into the LLM's prompt as framing only (product-corrected
+        // 2026-09-02) -- it is never applied as a retrieval filter.
         body: JSON.stringify(
           paperContext
-            ? { question: trimmedQuestion, paperNumber: paperContext.paperNumber }
+            ? {
+                question: trimmedQuestion,
+                paperNumber: paperContext.paperNumber,
+                paperTitle: paperContext.title,
+              }
             : { question: trimmedQuestion },
         ),
         signal: abortController.signal,

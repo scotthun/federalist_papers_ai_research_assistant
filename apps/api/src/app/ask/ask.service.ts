@@ -19,6 +19,7 @@ import {
   buildEmptyCitationsCorrection,
   buildInvalidCitationCorrection,
   buildInvalidOutputCorrection,
+  type CurrentPaper,
 } from './answer-prompt';
 import { decideAnswerTier, type AnswerTier } from './answer-thresholds';
 import { verifyCitations } from './verify-citations';
@@ -161,7 +162,12 @@ export class AskService {
     @Inject(AI_PROVIDER) private readonly aiProvider: AIProvider,
   ) {}
 
-  async ask(question: string, paperNumber?: number): Promise<Answer> {
+  // `currentPaper` (Story 5.2, product-corrected 2026-09-02) is prompt context only -- retrieval
+  // below always searches the whole archive regardless of whether it's present. The original
+  // version of this method threaded it into `retrieveRelevantChunks`'s `paperNumber` filter
+  // option instead; that's been reverted (see the spec's Spec Change Log) because it made a
+  // genuinely cross-paper question unanswerable while the chip was showing.
+  async ask(question: string, currentPaper?: CurrentPaper): Promise<Answer> {
     const start = Date.now();
 
     // The embedding call inside retrieveRelevantChunks is common to every tier -- a tier can't
@@ -176,7 +182,6 @@ export class AskService {
     try {
       chunks = await retrieveRelevantChunks(this.dataSource, this.aiProvider, question, {
         topK: TOP_K,
-        paperNumber,
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -187,7 +192,7 @@ export class AskService {
     const topScore = chunks[0]?.score;
     const tier = decideAnswerTier(topScore);
 
-    const outcome = await this.resolveOutcome(tier, question, chunks);
+    const outcome = await this.resolveOutcome(tier, question, chunks, currentPaper);
 
     this.logRequest({
       question,
@@ -210,10 +215,13 @@ export class AskService {
     tier: AnswerTier,
     question: string,
     chunks: RetrievedChunk[],
+    currentPaper?: CurrentPaper,
   ): Promise<AnswerOutcome> {
     switch (tier) {
       case 'confident':
-        return this.answerConfidently(question, chunks);
+        // currentPaper is prompt context for the LLM only -- the clarify/refuse tiers below never
+        // call the LLM at all, so there's nothing for it to thread into.
+        return this.answerConfidently(question, chunks, currentPaper);
       case 'clarify':
         // decideAnswerTier only returns 'clarify' when chunks[0] exists (a defined topScore
         // requires at least one chunk) -- the non-null assertion documents that invariant rather
@@ -235,10 +243,11 @@ export class AskService {
   private async answerConfidently(
     question: string,
     chunks: RetrievedChunk[],
+    currentPaper?: CurrentPaper,
   ): Promise<AnswerOutcome> {
     const retrievedChunkIds = new Set(chunks.map((chunk) => chunk.chunkId));
 
-    const first = await this.tryGenerate(question, chunks);
+    const first = await this.tryGenerate(question, chunks, undefined, currentPaper);
     if (first.errorMessage === undefined) {
       const verification = verifyCitations(first.citations, retrievedChunkIds);
       if (verification.valid) {
@@ -266,6 +275,7 @@ export class AskService {
         isEmptyCitations
           ? 'first attempt returned zero citations'
           : `first attempt cited invalid chunkId(s): ${verification.invalidChunkIds.join(', ')}`,
+        currentPaper,
       );
     }
 
@@ -275,6 +285,7 @@ export class AskService {
       retrievedChunkIds,
       buildInvalidOutputCorrection(first.errorMessage),
       `first attempt produced invalid output: ${first.errorMessage}`,
+      currentPaper,
     );
   }
 
@@ -284,8 +295,9 @@ export class AskService {
     retrievedChunkIds: ReadonlySet<string>,
     correction: string,
     firstFailureReason: string,
+    currentPaper?: CurrentPaper,
   ): Promise<AnswerOutcome> {
-    const retry = await this.tryGenerate(question, chunks, correction);
+    const retry = await this.tryGenerate(question, chunks, correction, currentPaper);
     if (retry.errorMessage === undefined) {
       const verification = verifyCitations(retry.citations, retrievedChunkIds);
       if (verification.valid) {
@@ -314,11 +326,12 @@ export class AskService {
     question: string,
     chunks: RetrievedChunk[],
     correction?: string,
+    currentPaper?: CurrentPaper,
   ): Promise<GenerateAttempt> {
     try {
       const output = await this.aiProvider.generateStructuredOutput({
         systemInstruction: ANSWER_SYSTEM_INSTRUCTION,
-        prompt: buildAnswerPrompt(question, chunks, correction),
+        prompt: buildAnswerPrompt(question, chunks, correction, currentPaper),
         schema: LlmAnswerOutputSchema,
       });
       return { answer: output.answer, citations: output.citations };

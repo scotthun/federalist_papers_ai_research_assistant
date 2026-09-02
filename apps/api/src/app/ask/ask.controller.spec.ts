@@ -32,8 +32,8 @@ describe('AskController', () => {
     await expect(controller.ask({ question: 'Why checks and balances?' })).resolves.toEqual(
       fakeAnswer,
     );
-    // Second argument is always passed (undefined when no paperNumber filter applies) -- Story
-    // 5.2's addition.
+    // Second argument (currentPaper, Story 5.2) is always passed, undefined when no paper
+    // context applies.
     expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
   });
 
@@ -74,18 +74,42 @@ describe('AskController', () => {
     expect(service.ask).not.toHaveBeenCalled();
   });
 
-  // Story 5.2: an optional `paperNumber` filter, threaded straight into AskService.ask's second
-  // argument.
-  describe('paperNumber (Story 5.2)', () => {
-    it('forwards a numeric paperNumber as the service\'s second argument', async () => {
+  // Story 5.2 (product-corrected 2026-09-02): an optional `{ paperNumber, paperTitle }` pair,
+  // threaded straight into AskService.ask's second argument as prompt context -- never a
+  // retrieval filter. Both fields must independently validate for `currentPaper` to be built at
+  // all.
+  describe('currentPaper: paperNumber + paperTitle (Story 5.2)', () => {
+    it('forwards a currentPaper object when both paperNumber and paperTitle are valid', async () => {
       service.ask.mockResolvedValue(fakeAnswer);
 
-      await controller.ask({ question: 'Why checks and balances?', paperNumber: 51 });
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: 51,
+        paperTitle: 'The Structure of the Government',
+      });
 
-      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', 51);
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', {
+        paperNumber: 51,
+        title: 'The Structure of the Government',
+      });
     });
 
-    it('calls the service with undefined when paperNumber is absent', async () => {
+    it('trims paperTitle before including it in currentPaper', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: 51,
+        paperTitle: '  The Structure of the Government  \n',
+      });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', {
+        paperNumber: 51,
+        title: 'The Structure of the Government',
+      });
+    });
+
+    it('calls the service with undefined when both paperNumber and paperTitle are absent', async () => {
       service.ask.mockResolvedValue(fakeAnswer);
 
       await controller.ask({ question: 'Why checks and balances?' });
@@ -93,41 +117,98 @@ describe('AskController', () => {
       expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
     });
 
-    it('treats a non-numeric paperNumber as absent (undefined), not a 400', async () => {
+    it('treats paperNumber present without paperTitle as no context at all, not a 400', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({ question: 'Why checks and balances?', paperNumber: 51 });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    it('treats paperTitle present without paperNumber as no context at all, not a 400', async () => {
       service.ask.mockResolvedValue(fakeAnswer);
 
       await controller.ask({
         question: 'Why checks and balances?',
-        paperNumber: 'fifty-one' as unknown as number,
+        paperTitle: 'The Structure of the Government',
       });
 
       expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
     });
 
-    it('treats a non-finite numeric paperNumber (NaN/Infinity) as absent, not a 400', async () => {
+    it('treats a non-numeric paperNumber as invalid, degrading to no context, not a 400', async () => {
       service.ask.mockResolvedValue(fakeAnswer);
 
-      await controller.ask({ question: 'Why checks and balances?', paperNumber: NaN });
-      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: 'fifty-one' as unknown as number,
+        paperTitle: 'The Structure of the Government',
+      });
 
-      await controller.ask({ question: 'Why checks and balances?', paperNumber: Infinity });
       expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
     });
 
-    // paperNumber ultimately becomes a bound SQL parameter matched against an integer column --
-    // zero, negative, and fractional values are equally nonsensical as a paper number and must
-    // degrade the same way as a non-number, never a 400 (this field is client-controlled, not
-    // end-user-typed).
-    it('treats zero, negative, and fractional paperNumbers as absent, not a 400', async () => {
+    it('treats a non-finite numeric paperNumber (NaN/Infinity) as invalid, not a 400', async () => {
       service.ask.mockResolvedValue(fakeAnswer);
 
-      await controller.ask({ question: 'Why checks and balances?', paperNumber: 0 });
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: NaN,
+        paperTitle: 'The Structure of the Government',
+      });
       expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
 
-      await controller.ask({ question: 'Why checks and balances?', paperNumber: -51 });
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: Infinity,
+        paperTitle: 'The Structure of the Government',
+      });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    // paperNumber is checked against the domain (a real paper number) even though it's no longer
+    // a SQL bound parameter -- zero, negative, and fractional values are equally nonsensical as a
+    // paper number and must degrade the same way as a non-number, never a 400.
+    it('treats zero, negative, and fractional paperNumbers as invalid, not a 400', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: 0,
+        paperTitle: 'The Structure of the Government',
+      });
       expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
 
-      await controller.ask({ question: 'Why checks and balances?', paperNumber: 51.5 });
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: -51,
+        paperTitle: 'The Structure of the Government',
+      });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: 51.5,
+        paperTitle: 'The Structure of the Government',
+      });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    it('treats a non-string or blank/whitespace-only paperTitle as invalid, not a 400', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: 51,
+        paperTitle: 12345 as unknown as string,
+      });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: 51,
+        paperTitle: '   \n\t  ',
+      });
       expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
     });
   });

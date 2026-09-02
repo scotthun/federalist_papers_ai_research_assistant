@@ -445,7 +445,7 @@ describe('QuillWidget', () => {
       expect(screen.getByLabelText('Remove paper context')).toBeTruthy();
     });
 
-    it('includes paperNumber in the /api/ask request body while the chip is present', async () => {
+    it('includes paperNumber and paperTitle in the /api/ask request body while the chip is present', async () => {
       mockAskFetchStream([
         {
           type: 'done',
@@ -464,13 +464,16 @@ describe('QuillWidget', () => {
         expect(screen.getByText('Ambition must counteract ambition.')).toBeTruthy();
       });
       const [, requestInit] = (global.fetch as jest.Mock).mock.calls[0];
+      // Sent as prompt context for the LLM (product-corrected 2026-09-02) -- apps/api never
+      // applies these as a retrieval filter; see ask.service.spec.ts for that guarantee.
       expect(JSON.parse(requestInit.body)).toEqual({
         question: 'Why checks and balances?',
         paperNumber: 51,
+        paperTitle: 'The Structure of the Government',
       });
     });
 
-    it('removes the chip on dismiss, and the next question omits paperNumber from the request body', async () => {
+    it('removes the chip on dismiss, and the next question omits paperNumber/paperTitle from the request body', async () => {
       mockAskFetchStream([
         {
           type: 'done',

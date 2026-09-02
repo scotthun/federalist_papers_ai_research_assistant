@@ -32,23 +32,46 @@ function formatContextBlock(context: RetrievedChunk[]): string {
     .join('\n\n---\n\n');
 }
 
+/** The paper currently open in the quill widget's Paper Reader context, if any (Story 5.2,
+ *  post-correction) -- prompt framing only, never a retrieval filter. See `buildAnswerPrompt`'s
+ *  doc comment. */
+export interface CurrentPaper {
+  paperNumber: number;
+  title: string;
+}
+
 /**
  * Builds the per-request prompt: the retrieved evidence passages with per-passage source
  * metadata (chunkId/paperNumber/paperTitle), the user's question, and an explicit "answer only
  * from this evidence" instruction (architecture-diagrams.md, "Prompt construction"). `correction`
  * is appended when this is the one allowed retry after a first attempt failed verification or
  * schema validation (`decisions.md`, "Citation verification") -- omitted on the first attempt.
+ *
+ * `currentPaper` (Story 5.2, product-corrected 2026-09-02) is the paper the quill widget's context
+ * chip announces, if any -- threaded in as a short contextual note *before* the `QUESTION:` line,
+ * never as a restriction on which evidence the model may draw from. The original version of this
+ * story applied the current paper as a hard `retrieveRelevantChunks` filter instead; the product
+ * owner reconsidered after the demo (see the spec's Spec Change Log) because that made a
+ * genuinely cross-paper question unanswerable while the chip was showing -- worse than doing
+ * nothing. The note here explicitly tells the model it may still answer from any paper.
  */
 export function buildAnswerPrompt(
   question: string,
   context: RetrievedChunk[],
   correction?: string,
+  currentPaper?: CurrentPaper,
 ): string {
   const contextBlock = formatContextBlock(context);
   const correctionBlock = correction ? `\n\nCORRECTION: ${correction}\n` : '';
+  const currentPaperNote = currentPaper
+    ? `NOTE: The user is currently reading Federalist No. ${currentPaper.paperNumber}: ` +
+      `"${currentPaper.title}". This is context only -- you may still answer using evidence ` +
+      "from any paper if that's the better answer.\n\n"
+    : '';
 
   return (
     `EVIDENCE:\n${contextBlock}\n${correctionBlock}\n` +
+    currentPaperNote +
     `QUESTION: ${question}\n\n` +
     'Answer only from the evidence above. Do not use any outside knowledge.'
   );

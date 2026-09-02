@@ -2,7 +2,7 @@
 title: 'Story 5.2: Chat Persistence & Page-Aware Context'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: true
 context: []
@@ -207,3 +207,18 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 **Verification performed:** `npx nx test web` (96/96 passing, 9 suites), `npx nx test api` (179/179 passing, 17 suites), `npx nx lint web`/`npx nx lint api` (0 errors), `npx nx build web` (succeeds) -- all re-run and confirmed green after the patch pass. All 11 I/O & Edge-Case Matrix rows are covered by at least one passing test.
 
 **Residual risks:** The two deferred items above (conversation-size/quota handling; chip-visibility `aria-live`) are tracked in frontmatter `deferred` for future attention, not blocking this story's acceptance criteria. Manual end-to-end browser verification (reload/new-tab/chip behavior against a real running app) was not performed in this session -- only automated tests, lint, and build.
+
+## Auto Run Result — Round 2 (Product Correction, 2026-09-02)
+
+**Summary:** Per the Spec Change Log entry above, the current paper is now threaded into the LLM prompt as contextual framing only, never applied as a `retrieveRelevantChunks` filter. Retrieval always searches the whole archive; a cross-paper question can still be answered/cited correctly while the context chip is present.
+
+**Files changed:**
+- `apps/api/src/app/ask/answer-prompt.ts` -- new exported `CurrentPaper` type; `buildAnswerPrompt` gained an optional `currentPaper` parameter, prepending a non-restrictive contextual note before `QUESTION:` when present.
+- `apps/api/src/app/ask/ask.service.ts` -- `ask()`'s second parameter is now `currentPaper?: CurrentPaper`, threaded through the confident-tier call chain (including the one retry) into `buildAnswerPrompt`; the `retrieveRelevantChunks` call reverted to `{ topK: TOP_K }` with no `paperNumber` option.
+- `apps/api/src/app/ask/ask.controller.ts` -- `AskRequestBody` gained `paperTitle?: unknown`; a `currentPaper` object is only built when both `paperNumber` (positive integer) and `paperTitle` (non-empty trimmed string) independently validate.
+- `apps/web/src/components/quill/quill-panel.tsx` -- the ask request body now includes `paperTitle` alongside `paperNumber`.
+- Updated specs: `answer-prompt.spec.ts` (new cases), `ask.controller.spec.ts` (replaced `paperNumber`-only cases with `currentPaper` validation cases), `ask.service.spec.ts` (replaced the SQL-bound-params filter test with prompt-content assertions, plus a case proving `paperNumber` never reaches the SQL params even when `currentPaper` is supplied), `quill-widget.spec.tsx` (expects `paperTitle` in the request body).
+
+**Verification performed:** `npx nx test web` (96/96 passing), `npx nx test api` (189/189 passing), `npx nx lint web`/`npx nx lint api` (0 errors), `npx nx build web` (succeeds).
+
+**Residual risk:** Real end-to-end confirmation that a cross-paper question gets correctly answered/cited while the chip is showing was not run against a live LLM in this session -- only unit-level prompt-text assertions confirm the contextual note is present and worded as non-restrictive.

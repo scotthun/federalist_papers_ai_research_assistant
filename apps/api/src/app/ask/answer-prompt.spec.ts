@@ -56,6 +56,48 @@ describe('buildAnswerPrompt', () => {
 
     expect(prompt).toContain('CORRECTION: fix your citations');
   });
+
+  // Story 5.2 (product-corrected 2026-09-02): the current paper is prompt context only, never a
+  // restriction -- see the spec's Spec Change Log for why the original "hard filter" version of
+  // this story was reverted.
+  describe('currentPaper contextual note', () => {
+    it('prepends a note naming the paper number and title before the QUESTION line when currentPaper is given', () => {
+      const prompt = buildAnswerPrompt('question', [chunk()], undefined, {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(prompt).toContain('Federalist No. 10');
+      expect(prompt).toContain('The Same Subject Continued');
+      expect(prompt.indexOf('Federalist No. 10')).toBeLessThan(prompt.indexOf('QUESTION:'));
+    });
+
+    it('explicitly tells the model the note is context only, not a restriction', () => {
+      const prompt = buildAnswerPrompt('question', [chunk()], undefined, {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(prompt.toLowerCase()).toMatch(/context only/);
+      expect(prompt.toLowerCase()).toMatch(/any paper/);
+    });
+
+    it('omits the note entirely when currentPaper is absent', () => {
+      const prompt = buildAnswerPrompt('question', [chunk()]);
+
+      expect(prompt).not.toContain('currently reading');
+    });
+
+    it('combines correctly with a correction block (both present)', () => {
+      const prompt = buildAnswerPrompt('question', [chunk()], 'fix your citations', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(prompt).toContain('CORRECTION: fix your citations');
+      expect(prompt).toContain('Federalist No. 10');
+    });
+  });
 });
 
 describe('buildInvalidCitationCorrection', () => {

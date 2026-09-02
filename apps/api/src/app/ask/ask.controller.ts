@@ -7,11 +7,17 @@ import { AskService } from './ask.service';
  *  string before anything else (retrieval, the LLM) ever runs. */
 export interface AskRequestBody {
   question?: unknown;
-  /** Optional retrieval filter (Story 5.2) -- set by the quill widget only when its context chip
-   *  is showing (client-controlled, not end-user-typed). Anything other than a positive integer
-   *  (non-number, NaN/Infinity, zero, negative, or fractional) is treated as absent (no filter, no
-   *  error), never a 400 -- see `ask()`'s coercion below. */
+  /** Optional prompt context (Story 5.2, product-corrected 2026-09-02) -- set by the quill widget
+   *  only when its context chip is showing (client-controlled, not end-user-typed). Threaded into
+   *  the LLM's prompt as framing ("the user is reading paper N"), never into the retrieval
+   *  filter -- retrieval always searches the whole archive regardless of these fields. Only
+   *  usable together with `paperTitle`; anything other than a positive integer (non-number,
+   *  NaN/Infinity, zero, negative, or fractional) is treated as absent (no context, no error) --
+   *  see `ask()`'s coercion below. */
   paperNumber?: unknown;
+  /** Paired with `paperNumber` above -- only usable when both are valid. Anything other than a
+   *  non-empty (after trim) string is treated as absent. */
+  paperTitle?: unknown;
 }
 
 /**
@@ -41,21 +47,27 @@ export class AskController {
     if (trimmedQuestion.length === 0) {
       throw new BadRequestException('question is required and must not be blank');
     }
-    // A malformed/absent paperNumber degrades to "search the whole archive" rather than a 400
-    // (this story's Boundaries/I/O matrix) -- this field is client-controlled (our own quill
-    // panel), not end-user-typed. `paperNumber` ultimately becomes a bound SQL parameter matched
-    // against an integer column (libs/retrieval's `paper.paper_number = $N`), so this is a
-    // positive-integer check, not just "any finite number" -- zero, negative, and fractional
-    // values are equally nonsensical as a paper number and degrade the same way.
-    const paperNumber =
+    // A malformed/absent paperNumber/paperTitle degrades to "no paper context" rather than a 400
+    // (this story's Boundaries/I/O matrix) -- these fields are client-controlled (our own quill
+    // panel), not end-user-typed. paperNumber is a positive-integer check (matching the domain --
+    // zero, negative, and fractional values are equally nonsensical as a paper number), and
+    // paperTitle must be a non-empty string after trimming. Both must be independently valid for
+    // `currentPaper` to be built at all -- "only paperNumber" or "only paperTitle" is treated the
+    // same as neither (this field pair is prompt context only, never a retrieval filter --
+    // product correction, 2026-09-02, see the spec's Spec Change Log).
+    const isValidPaperNumber =
       typeof body?.paperNumber === 'number' &&
       Number.isInteger(body.paperNumber) &&
-      body.paperNumber > 0
-        ? body.paperNumber
+      body.paperNumber > 0;
+    const trimmedPaperTitle =
+      typeof body?.paperTitle === 'string' ? body.paperTitle.trim() : '';
+    const currentPaper =
+      isValidPaperNumber && trimmedPaperTitle.length > 0
+        ? { paperNumber: body.paperNumber as number, title: trimmedPaperTitle }
         : undefined;
 
     // Forward the already-validated, trimmed value -- not the raw `question` -- so
     // leading/trailing whitespace never reaches retrieval/the LLM/the request log.
-    return this.askService.ask(trimmedQuestion, paperNumber);
+    return this.askService.ask(trimmedQuestion, currentPaper);
   }
 }
