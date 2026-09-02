@@ -1,7 +1,6 @@
 import Link from 'next/link';
 import type { PaperSummary } from '@federalist-research/shared';
 import { ApiUnreachableNotice } from '@/components/api-unreachable-notice';
-import { AskQuestion } from '@/components/ask-question';
 import { QuickFindSearch } from '@/components/quick-find-search';
 import { Button } from '@/components/ui/button';
 import {
@@ -96,14 +95,6 @@ export default async function BrowsePapersPage({
           Explore the Federalist Papers with source-grounded AI.
         </p>
       </header>
-
-      {/* "Ask the Archive" + Answer section (Story 3.1/3.2) -- a self-contained functional unit
-          rendered above Quick Find/Browse Papers, per ui-design.md's Main Page section ordering.
-          The two-column layout (search+answer left, sources right) is explicitly Story 3.3's
-          scope, not this one's -- everything here stacks in a single column for now. */}
-      <div className="mb-10">
-        <AskQuestion />
-      </div>
 
       <div className="mb-6 space-y-3">
         <QuickFindSearch />

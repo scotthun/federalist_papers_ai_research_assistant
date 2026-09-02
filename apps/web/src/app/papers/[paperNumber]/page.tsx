@@ -80,6 +80,14 @@ async function fetchPaperDetail(
   return { status: 'ok', paper: body };
 }
 
+/** Collapses all whitespace runs (including newlines) to a single space and trims -- lets a
+ * `highlight` value copied from a citation's `quotedPassage` match against `fullText` even though
+ * the two may have been through different whitespace normalization (e.g. the stored text's
+ * `\n\n` paragraph breaks) without requiring an exact byte-for-byte match. */
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
 /** Next.js App Router page-prop convention: `searchParams` is always a `Promise` (same as
  * `params`). Defaulted so direct test invocations that omit it entirely (this page's
  * pre-Story-2.1 tests) keep working unchanged -- Next itself always supplies a real value at
@@ -89,7 +97,7 @@ export default async function PaperReaderPage({
   searchParams = Promise.resolve({}),
 }: {
   params: Promise<{ paperNumber: string }>;
-  searchParams?: Promise<{ q?: string | string[] }>;
+  searchParams?: Promise<{ q?: string | string[]; highlight?: string | string[] }>;
 }) {
   const { paperNumber: rawPaperNumber } = await params;
   const paperNumber = parsePaperNumberRouteSegment(rawPaperNumber);
@@ -104,6 +112,13 @@ export default async function PaperReaderPage({
   const resolvedSearchParams = await searchParams;
   const rawQuery = resolvedSearchParams.q;
   const query = (Array.isArray(rawQuery) ? rawQuery[0] ?? '' : rawQuery ?? '').trim();
+  // A repeated `?highlight=&highlight=` would arrive as string[] -- only the first value is ever
+  // meaningful here (same convention as `q` above). Absent/whitespace-only means "no highlight",
+  // never a crash or a no-op match against every paragraph.
+  const rawHighlight = resolvedSearchParams.highlight;
+  const highlight = (
+    Array.isArray(rawHighlight) ? rawHighlight[0] ?? '' : rawHighlight ?? ''
+  ).trim();
   // When the reader was reached from a search result, the back-link should return to those
   // results, not the generic unfiltered Browse Papers list (this story's Boundaries).
   const hasSearchContext = query.length > 0;
@@ -134,13 +149,13 @@ export default async function PaperReaderPage({
           </CardContent>
         </Card>
       ) : (
-        <PaperReader paper={result.paper} />
+        <PaperReader paper={result.paper} highlight={highlight} />
       )}
     </main>
   );
 }
 
-function PaperReader({ paper }: { paper: PaperDetail }) {
+function PaperReader({ paper, highlight }: { paper: PaperDetail; highlight: string }) {
   // Story 1.2's parser joins paragraphs with "\n\n" -- split back apart so the full text renders
   // as real paragraphs, not one unbroken block (Boundaries: "paragraph breaks preserved").
   // Blank/whitespace-only segments (from leading/trailing or repeated blank-line sequences in the
@@ -148,6 +163,17 @@ function PaperReader({ paper }: { paper: PaperDetail }) {
   const paragraphs = paper.fullText
     .split('\n\n')
     .filter((paragraph) => paragraph.trim().length > 0);
+
+  // A citation link's `highlight` (a `quotedPassage` copied verbatim from a chunk, Story 5.1)
+  // matches whichever paragraph contains it after both sides are whitespace-normalized -- only
+  // the *first* match is tagged, matching the AC's "the matched paragraph" (singular).
+  const normalizedHighlight = highlight.length > 0 ? normalizeWhitespace(highlight) : '';
+  const highlightIndex =
+    normalizedHighlight.length > 0
+      ? paragraphs.findIndex((paragraph) =>
+          normalizeWhitespace(paragraph).includes(normalizedHighlight),
+        )
+      : -1;
 
   return (
     <article className="mt-8">
@@ -178,10 +204,20 @@ function PaperReader({ paper }: { paper: PaperDetail }) {
 
       <Card>
         <CardContent className="space-y-4 pt-6 font-serif text-base leading-relaxed text-foreground">
-          {paragraphs.map((paragraph, index) => (
+          {paragraphs.map((paragraph, index) =>
             // Index keys are safe here -- fullText is static per render, never reordered/edited.
-            <p key={index}>{paragraph}</p>
-          ))}
+            index === highlightIndex ? (
+              <p
+                key={index}
+                id="cited-passage"
+                className="-mx-2 rounded-md bg-quill-surface-highlight px-2"
+              >
+                {paragraph}
+              </p>
+            ) : (
+              <p key={index}>{paragraph}</p>
+            ),
+          )}
         </CardContent>
       </Card>
     </article>
