@@ -163,7 +163,13 @@ export default async function BrowsePapersPage({
                       <span className="w-14 shrink-0 font-mono text-sm text-muted-foreground">
                         No. {paper.paperNumber}
                       </span>
-                      <span className="flex flex-col">
+                      {/* min-w-0 overrides the flex item's default min-width:auto, which would
+                          otherwise force this column to grow to fit its unwrapped content instead
+                          of shrinking -- flex-1 then lets it fill the row's remaining width so
+                          long titles have room to wrap onto a second line rather than overflowing
+                          past the row (inherited from the parent Button's `whitespace-nowrap`,
+                          which this span's own `whitespace-normal` overrides just for this text). */}
+                      <span className="flex min-w-0 flex-1 flex-col whitespace-normal">
                         <span className="font-medium text-foreground">
                           {paper.title}
                         </span>
