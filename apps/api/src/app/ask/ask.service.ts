@@ -161,7 +161,7 @@ export class AskService {
     @Inject(AI_PROVIDER) private readonly aiProvider: AIProvider,
   ) {}
 
-  async ask(question: string): Promise<Answer> {
+  async ask(question: string, paperNumber?: number): Promise<Answer> {
     const start = Date.now();
 
     // The embedding call inside retrieveRelevantChunks is common to every tier -- a tier can't
@@ -176,6 +176,7 @@ export class AskService {
     try {
       chunks = await retrieveRelevantChunks(this.dataSource, this.aiProvider, question, {
         topK: TOP_K,
+        paperNumber,
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);

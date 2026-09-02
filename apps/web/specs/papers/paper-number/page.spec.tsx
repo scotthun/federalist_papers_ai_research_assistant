@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import type { PaperDetail } from '@federalist-research/shared';
 import Page from '../../../src/app/papers/[paperNumber]/page';
+import { PaperContextProvider, usePaperContext } from '../../../src/components/quill/paper-context';
 
 /**
  * Page is an async Server Component (fetches PaperDetail from apps/api). It's still a plain
@@ -418,6 +419,42 @@ describe('Paper Reader page', () => {
     expect(document.getElementById('cited-passage')).toBeNull();
     expect(screen.getByText('Paragraph one.')).toBeTruthy();
     expect(screen.getByText('Paragraph two.')).toBeTruthy();
+  });
+
+  // Story 5.2: PaperReaderPage renders AnnouncePaperContext (a client component) alongside
+  // PaperReader so the layout-level QuillWidget learns which paper is current -- asserted here
+  // via a test-only context consumer wrapping the page's already-resolved element tree.
+  it('renders AnnouncePaperContext with the fetched paper\'s number/title', async () => {
+    function CurrentPaperDisplay() {
+      const { currentPaper } = usePaperContext();
+      return (
+        <p data-testid="current-paper">
+          {currentPaper ? `${currentPaper.paperNumber}:${currentPaper.title}` : 'none'}
+        </p>
+      );
+    }
+
+    const paper: PaperDetail = {
+      paperNumber: 7,
+      title: 'The Same Subject Continued',
+      authors: ['Jay'],
+      fullText: 'Some text.',
+      sourceUrl: 'https://avalon.law.yale.edu/18th_century/fed07.asp',
+    };
+    mockFetchResolved({ ok: true, status: 200, body: paper });
+
+    const pageElement = await Page({ params: paramsFor('7') });
+
+    render(
+      <PaperContextProvider>
+        {pageElement}
+        <CurrentPaperDisplay />
+      </PaperContextProvider>,
+    );
+
+    expect(screen.getByTestId('current-paper').textContent).toBe(
+      '7:The Same Subject Continued',
+    );
   });
 
   it('renders a clear error state when paperNumber is NaN', async () => {

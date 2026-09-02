@@ -5,6 +5,7 @@ import {
   type PaperDetail,
 } from '@federalist-research/shared';
 import { ApiUnreachableNotice } from '@/components/api-unreachable-notice';
+import { AnnouncePaperContext } from '@/components/quill/announce-paper-context';
 import { Card, CardContent } from '@/components/ui/card';
 import { API_FETCH_TIMEOUT_MS, resolveApiBaseUrl } from '@/lib/api-client';
 
@@ -149,7 +150,15 @@ export default async function PaperReaderPage({
           </CardContent>
         </Card>
       ) : (
-        <PaperReader paper={result.paper} highlight={highlight} />
+        <>
+          {/* Tells the layout-level QuillWidget which paper is currently being read (Story 5.2)
+              -- rendered only on the success branch, matching "this page is a paper" exactly. */}
+          <AnnouncePaperContext
+            paperNumber={result.paper.paperNumber}
+            title={result.paper.title}
+          />
+          <PaperReader paper={result.paper} highlight={highlight} />
+        </>
       )}
     </main>
   );

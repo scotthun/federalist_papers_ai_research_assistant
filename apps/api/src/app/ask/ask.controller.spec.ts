@@ -32,7 +32,9 @@ describe('AskController', () => {
     await expect(controller.ask({ question: 'Why checks and balances?' })).resolves.toEqual(
       fakeAnswer,
     );
-    expect(service.ask).toHaveBeenCalledWith('Why checks and balances?');
+    // Second argument is always passed (undefined when no paperNumber filter applies) -- Story
+    // 5.2's addition.
+    expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
   });
 
   // Finding: the controller validated `question.trim().length === 0` but then forwarded the
@@ -43,7 +45,7 @@ describe('AskController', () => {
 
     await controller.ask({ question: '  Why checks and balances?  \n' });
 
-    expect(service.ask).toHaveBeenCalledWith('Why checks and balances?');
+    expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
   });
 
   // This story's I/O Edge-Case Matrix: "Blank/whitespace question ... 400 ... Never reaches
@@ -70,5 +72,63 @@ describe('AskController', () => {
       controller.ask({ question: 12345 as unknown as string }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(service.ask).not.toHaveBeenCalled();
+  });
+
+  // Story 5.2: an optional `paperNumber` filter, threaded straight into AskService.ask's second
+  // argument.
+  describe('paperNumber (Story 5.2)', () => {
+    it('forwards a numeric paperNumber as the service\'s second argument', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({ question: 'Why checks and balances?', paperNumber: 51 });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', 51);
+    });
+
+    it('calls the service with undefined when paperNumber is absent', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({ question: 'Why checks and balances?' });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    it('treats a non-numeric paperNumber as absent (undefined), not a 400', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        paperNumber: 'fifty-one' as unknown as number,
+      });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    it('treats a non-finite numeric paperNumber (NaN/Infinity) as absent, not a 400', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({ question: 'Why checks and balances?', paperNumber: NaN });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+
+      await controller.ask({ question: 'Why checks and balances?', paperNumber: Infinity });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    // paperNumber ultimately becomes a bound SQL parameter matched against an integer column --
+    // zero, negative, and fractional values are equally nonsensical as a paper number and must
+    // degrade the same way as a non-number, never a 400 (this field is client-controlled, not
+    // end-user-typed).
+    it('treats zero, negative, and fractional paperNumbers as absent, not a 400', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({ question: 'Why checks and balances?', paperNumber: 0 });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+
+      await controller.ask({ question: 'Why checks and balances?', paperNumber: -51 });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+
+      await controller.ask({ question: 'Why checks and balances?', paperNumber: 51.5 });
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
   });
 });

@@ -20,6 +20,12 @@ type PanelProps = {
   messages: QuillMessage[];
   setMessages: Dispatch<SetStateAction<QuillMessage[]>>;
   onCollapse: () => void;
+  /** Non-null only when the panel was opened while a Paper Reader page announced itself as
+   *  current (Story 5.2) -- drives both the removable context chip and the `paperNumber`
+   *  retrieval filter sent with the next ask request. `null` means "search the whole archive"
+   *  (Homepage/Browse Papers, or the chip was dismissed). */
+  paperContext: { paperNumber: number; title: string } | null;
+  onDismissPaperContext: () => void;
 };
 
 let messageIdCounter = 0;
@@ -86,7 +92,13 @@ function markConnectionLost(
  * this component only owns its own input value and in-flight send status, both of which are fine
  * to reset every time the panel reopens.
  */
-export function QuillPanel({ messages, setMessages, onCollapse }: PanelProps) {
+export function QuillPanel({
+  messages,
+  setMessages,
+  onCollapse,
+  paperContext,
+  onDismissPaperContext,
+}: PanelProps) {
   const [question, setQuestion] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   // Deliberately *not* local state: this component unmounts on collapse (quill-widget.tsx), and
@@ -154,7 +166,14 @@ export function QuillPanel({ messages, setMessages, onCollapse }: PanelProps) {
       const response = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: trimmedQuestion }),
+        // paperContext (if present) is the same boolean/value that drove the chip's visibility
+        // when this question was submitted (Story 5.2's Boundaries) -- included only when
+        // non-null, so a dismissed/absent context never sends a stray paperNumber.
+        body: JSON.stringify(
+          paperContext
+            ? { question: trimmedQuestion, paperNumber: paperContext.paperNumber }
+            : { question: trimmedQuestion },
+        ),
         signal: abortController.signal,
       });
 
@@ -235,6 +254,22 @@ export function QuillPanel({ messages, setMessages, onCollapse }: PanelProps) {
       </header>
 
       <div className="flex-1 space-y-3 overflow-y-auto p-3">
+        {paperContext && (
+          <div className="flex justify-start">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-quill-accent-gold bg-quill-surface-chip px-3 py-1 text-xs text-quill-ink-secondary">
+              <span aria-hidden="true">📄</span> Federalist No. {paperContext.paperNumber} —{' '}
+              {paperContext.title}
+              <button
+                type="button"
+                onClick={onDismissPaperContext}
+                aria-label="Remove paper context"
+                className="ml-0.5 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold"
+              >
+                ✕
+              </button>
+            </span>
+          </div>
+        )}
         {messages.length === 0 && (
           <p className="text-sm text-quill-ink-muted">
             Ask a question about the Federalist Papers.

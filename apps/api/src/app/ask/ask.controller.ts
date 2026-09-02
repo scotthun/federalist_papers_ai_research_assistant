@@ -7,6 +7,11 @@ import { AskService } from './ask.service';
  *  string before anything else (retrieval, the LLM) ever runs. */
 export interface AskRequestBody {
   question?: unknown;
+  /** Optional retrieval filter (Story 5.2) -- set by the quill widget only when its context chip
+   *  is showing (client-controlled, not end-user-typed). Anything other than a positive integer
+   *  (non-number, NaN/Infinity, zero, negative, or fractional) is treated as absent (no filter, no
+   *  error), never a 400 -- see `ask()`'s coercion below. */
+  paperNumber?: unknown;
 }
 
 /**
@@ -36,8 +41,21 @@ export class AskController {
     if (trimmedQuestion.length === 0) {
       throw new BadRequestException('question is required and must not be blank');
     }
+    // A malformed/absent paperNumber degrades to "search the whole archive" rather than a 400
+    // (this story's Boundaries/I/O matrix) -- this field is client-controlled (our own quill
+    // panel), not end-user-typed. `paperNumber` ultimately becomes a bound SQL parameter matched
+    // against an integer column (libs/retrieval's `paper.paper_number = $N`), so this is a
+    // positive-integer check, not just "any finite number" -- zero, negative, and fractional
+    // values are equally nonsensical as a paper number and degrade the same way.
+    const paperNumber =
+      typeof body?.paperNumber === 'number' &&
+      Number.isInteger(body.paperNumber) &&
+      body.paperNumber > 0
+        ? body.paperNumber
+        : undefined;
+
     // Forward the already-validated, trimmed value -- not the raw `question` -- so
     // leading/trailing whitespace never reaches retrieval/the LLM/the request log.
-    return this.askService.ask(trimmedQuestion);
+    return this.askService.ask(trimmedQuestion, paperNumber);
   }
 }
