@@ -1,0 +1,53 @@
+<!--
+Key screen: Homepage with collapsed quill launcher (idle, no pulse — returning-visitor state).
+Illustrates: EXPERIENCE.md Information Architecture (Homepage row), Component Patterns "Launcher (quill)"
+idle state, DESIGN.md Colors/Typography/Shapes tokens (surface, surface-panel, ink-primary/secondary,
+accent-gold halo, {typography.display}/{typography.heading}/{typography.body}).
+Governing spine sections: EXPERIENCE.md §Information Architecture, §Component Patterns, §State Patterns
+("Idle / returning visit"). Real content: header/subtitle/paper rows carried over from ui-design.md and
+the pre-existing home-full.png screenshot (rows unchanged by this workspace, per §Mock coverage).
+No inline "Ask the Archive" box — superseded per .memlog.md.
+-->
+<div style="font-family: Georgia, 'Times New Roman', serif; background:#fdfaf3; min-height: 640px; padding: 0; position: relative;">
+
+  <div style="max-width: 760px; margin: 0 auto; padding: 48px 24px 24px;">
+    <h1 style="font-size: 28px; font-weight: 400; color:#3a2f24; margin: 0 0 6px;">Federalist Research</h1>
+    <p style="font-size: 14px; color:#6b4f3b; margin: 0 0 40px;">Explore the Federalist Papers with source-grounded AI.</p>
+
+    <h2 style="font-size: 18px; font-weight: 400; color:#3a2f24; margin: 0 0 4px;">Browse Papers</h2>
+    <p style="font-size: 12px; color:#a08a68; margin: 0 0 16px;">All 85 Federalist Papers, in order.</p>
+
+    <div style="background:#fbf6ea; border:1px solid #e6dcc0; border-radius:8px; overflow:hidden;">
+      <div style="display:flex; gap:16px; padding:14px 18px; border-bottom:1px solid #e6dcc0;">
+        <div style="width:48px; font-size:13px; color:#a08a68;">No. 1</div>
+        <div>
+          <div style="font-size:16px; color:#3a2f24;">General Introduction</div>
+          <div style="font-size:13px; color:#6b4f3b;">Hamilton</div>
+        </div>
+      </div>
+      <div style="display:flex; gap:16px; padding:14px 18px; border-bottom:1px solid #e6dcc0;">
+        <div style="width:48px; font-size:13px; color:#a08a68;">No. 10</div>
+        <div>
+          <div style="font-size:16px; color:#3a2f24;">The Union as a Safeguard Against Domestic Faction and Insurrection</div>
+          <div style="font-size:13px; color:#6b4f3b;">Madison</div>
+        </div>
+      </div>
+      <div style="display:flex; gap:16px; padding:14px 18px;">
+        <div style="width:48px; font-size:13px; color:#a08a68;">No. 51</div>
+        <div>
+          <div style="font-size:16px; color:#3a2f24;">The Structure of the Government Must Furnish the Proper Checks and Balances</div>
+          <div style="font-size:13px; color:#6b4f3b;">Hamilton, Madison</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quill launcher, collapsed / idle (no pulse, no tooltip — returning-visitor state) -->
+  <div style="position:absolute; right:32px; bottom:32px; text-align:center;">
+    <div style="width:56px; height:56px; border-radius:50%; background:radial-gradient(circle at 30% 30%, #4a3a28, #2f2418); box-shadow: 0 0 0 6px rgba(201,162,39,0.25), 0 3px 8px rgba(0,0,0,0.3); display:flex; align-items:center; justify-content:center; margin:0 auto;">
+      <span style="font-size:26px; transform:rotate(-40deg); display:inline-block;">🪶</span>
+    </div>
+    <div style="font-size:10px; color:#a08a68; margin-top:6px;">idle — no pulse, no tooltip</div>
+  </div>
+
+</div>
