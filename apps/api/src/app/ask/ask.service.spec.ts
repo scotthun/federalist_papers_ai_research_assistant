@@ -388,6 +388,70 @@ describe('AskService', () => {
       expect(aiProvider.generateStructuredOutput).not.toHaveBeenCalled();
       expect(result.insufficientEvidence).toBe(true);
     });
+
+    // 2026-09-03 follow-up: a vague question ("give me a TLDR") while the quill panel's context
+    // chip is showing often lands here (low signal, no single archive-wide match), and this is
+    // exactly the case where the templated guess must not ignore that the user is visibly
+    // looking at a specific paper -- naming some unrelated higher-scored paper instead would be
+    // the same "AI can't tell what page I'm on" complaint this whole follow-up exists to fix.
+    it("prefers the current paper's own chunk for its guess over the raw archive-wide top score, when the current paper is present in the retrieved chunks", async () => {
+      const aiProvider = fakeAiProvider();
+      const midpoint = (CONFIDENT_THRESHOLD + CLARIFY_THRESHOLD) / 2;
+      const { service } = buildService(
+        [
+          fakeRow({
+            chunkId: 'higher-scored-unrelated-chunk',
+            paperNumber: 39,
+            paperTitle: 'The Conformity of the Plan to Republican Principles',
+            score: midpoint,
+          }),
+          fakeRow({
+            chunkId: 'current-paper-chunk',
+            paperNumber: 37,
+            paperTitle: 'Concerning the Difficulties of the Convention',
+            score: midpoint - 0.05,
+          }),
+        ],
+        aiProvider,
+      );
+
+      const result = await service.ask('Can you give me a TLDR of this paper?', {
+        paperNumber: 37,
+        title: 'Concerning the Difficulties of the Convention',
+      });
+
+      expect(aiProvider.generateStructuredOutput).not.toHaveBeenCalled();
+      expect(result.answer).toContain('37');
+      expect(result.answer).not.toContain('39');
+      expect(result.citations).toEqual([
+        {
+          paperNumber: 37,
+          paperTitle: 'Concerning the Difficulties of the Convention',
+          chunkId: 'current-paper-chunk',
+        },
+      ]);
+    });
+
+    it("falls back to the raw top score's paper when the current paper isn't among the retrieved chunks at all", async () => {
+      const aiProvider = fakeAiProvider();
+      const midpoint = (CONFIDENT_THRESHOLD + CLARIFY_THRESHOLD) / 2;
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'chunk-39', paperNumber: 39, score: midpoint }),
+        ])
+        .mockRejectedValueOnce(new Error('pinning lookup failed'));
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider);
+
+      const result = await service.ask('Can you give me a TLDR of this paper?', {
+        paperNumber: 37,
+        title: 'Concerning the Difficulties of the Convention',
+      });
+
+      expect(result.answer).toContain('39');
+      expect(result.citations[0].paperNumber).toBe(39);
+    });
   });
 
   describe('refuse tier', () => {

@@ -68,11 +68,24 @@ function refuseOutcome(error?: string): AnswerOutcome {
 
 /**
  * The clarify tier's templated, code-generated response (`decisions.md`, "Confidence tiering"):
- * names the top retrieved chunk's paper as an unproven best guess. `quotedPassage`/
- * `relevanceExplanation` are deliberately omitted from the citation -- it's a guess, not a
- * verified source (this story's Boundaries).
+ * names a retrieved chunk's paper as an unproven best guess. `quotedPassage`/`relevanceExplanation`
+ * are deliberately omitted from the citation -- it's a guess, not a verified source (this story's
+ * Boundaries).
+ *
+ * Prefers a chunk from `currentPaper` when one is present in `chunks` (2026-09-03 follow-up to
+ * Story 5.2's pinning fix) -- otherwise this tier's guess is the *raw archive-wide top score's*
+ * paper, which for a vague low-signal question can easily be some unrelated paper that happened
+ * to score marginally higher than the paper the user is visibly looking at, even when that
+ * paper's own chunks (pinned or already-present) are sitting right there in the evidence. Falls
+ * back to `chunks[0]` (the true top-scored chunk) when `currentPaper` is absent, or its paper
+ * isn't among `chunks` at all (pinning is itself best-effort, so this can't assume it always is).
  */
-function clarifyOutcome(topChunk: RetrievedChunk): AnswerOutcome {
+function clarifyOutcome(chunks: RetrievedChunk[], currentPaper?: CurrentPaper): AnswerOutcome {
+  const topChunk =
+    (currentPaper &&
+      chunks.find((chunk) => chunk.paperNumber === currentPaper.paperNumber)) ||
+    chunks[0];
+
   return {
     answer:
       `I think you might be asking about Federalist No. ${topChunk.paperNumber} ` +
@@ -251,14 +264,16 @@ export class AskService {
   ): Promise<AnswerOutcome> {
     switch (tier) {
       case 'confident':
-        // currentPaper is prompt context for the LLM only -- the clarify/refuse tiers below never
-        // call the LLM at all, so there's nothing for it to thread into.
+        // currentPaper is prompt context for the LLM only -- refuse below never calls the LLM
+        // at all (its message is paper-agnostic by design), so there's nothing for it to thread
+        // into; clarify below never calls the LLM either, but does use currentPaper to prefer
+        // its templated guess.
         return this.answerConfidently(question, chunks, currentPaper);
       case 'clarify':
         // decideAnswerTier only returns 'clarify' when chunks[0] exists (a defined topScore
-        // requires at least one chunk) -- the non-null assertion documents that invariant rather
-        // than re-deriving it.
-        return clarifyOutcome(chunks[0]);
+        // requires at least one chunk) -- clarifyOutcome's own fallback-to-chunks[0] documents
+        // that invariant rather than re-deriving it here too.
+        return clarifyOutcome(chunks, currentPaper);
       case 'refuse':
         return refuseOutcome();
     }
