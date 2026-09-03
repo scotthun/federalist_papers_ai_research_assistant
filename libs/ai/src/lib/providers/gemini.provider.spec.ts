@@ -168,6 +168,132 @@ describe('GeminiProvider', () => {
       await expect(promise).rejects.toThrow('network error: ECONNRESET');
       await promise.catch((err) => {
         expect(err.cause).toBe(networkError);
+        // No HTTP status at all (a plain network error) -- classified as 'unavailable', the
+        // catch-all for "never even got a response to classify by status".
+        expect(err.kind).toBe('unavailable');
+      });
+    });
+
+    // 2026-09-03 second follow-up: classify by the real @google/generative-ai
+    // GoogleGenerativeAIFetchError shape (.status/.errorDetails), which LangChain's own
+    // completionWithRetry rethrows verbatim (confirmed by reading its source) -- so callers can
+    // tell a daily quota apart from a transient overload instead of one generic bucket.
+    describe('error classification (ProviderFailureKind)', () => {
+      function fetchError(
+        status: number,
+        errorDetails?: Array<{ '@type'?: string; [key: string]: unknown }>,
+      ) {
+        const err = new Error(`Error fetching from https://example.test: [${status}] boom`);
+        return Object.assign(err, { status, errorDetails });
+      }
+
+      it('classifies 503 as overloaded', async () => {
+        invoke.mockRejectedValue(fetchError(503));
+        const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+        const promise = provider.generateStructuredOutput({
+          systemInstruction: 'sys',
+          prompt: 'prompt',
+          schema: outputSchema,
+        });
+
+        await promise.catch((err) => {
+          expect(err.kind).toBe('overloaded');
+        });
+      });
+
+      it('classifies a 429 with a per-day QuotaFailure detail as rate_limited_daily', async () => {
+        invoke.mockRejectedValue(
+          fetchError(429, [
+            {
+              '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+              violations: [
+                { quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' },
+              ],
+            },
+          ]),
+        );
+        const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+        const promise = provider.generateStructuredOutput({
+          systemInstruction: 'sys',
+          prompt: 'prompt',
+          schema: outputSchema,
+        });
+
+        await promise.catch((err) => {
+          expect(err.kind).toBe('rate_limited_daily');
+        });
+      });
+
+      it('classifies a 429 without a per-day quota detail as rate_limited_short, parsing the RetryInfo delay', async () => {
+        invoke.mockRejectedValue(
+          fetchError(429, [
+            {
+              '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+              violations: [{ quotaId: 'GenerateRequestsPerMinutePerProject-FreeTier' }],
+            },
+            { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '18s' },
+          ]),
+        );
+        const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+        const promise = provider.generateStructuredOutput({
+          systemInstruction: 'sys',
+          prompt: 'prompt',
+          schema: outputSchema,
+        });
+
+        await promise.catch((err) => {
+          expect(err.kind).toBe('rate_limited_short');
+          expect(err.retryAfterSeconds).toBe(18);
+        });
+      });
+
+      it('classifies a 429 with no error details at all as rate_limited_short with no retry hint', async () => {
+        invoke.mockRejectedValue(fetchError(429));
+        const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+        const promise = provider.generateStructuredOutput({
+          systemInstruction: 'sys',
+          prompt: 'prompt',
+          schema: outputSchema,
+        });
+
+        await promise.catch((err) => {
+          expect(err.kind).toBe('rate_limited_short');
+          expect(err.retryAfterSeconds).toBeUndefined();
+        });
+      });
+
+      it('classifies other 5xx statuses as server_error', async () => {
+        invoke.mockRejectedValue(fetchError(500));
+        const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+        const promise = provider.generateStructuredOutput({
+          systemInstruction: 'sys',
+          prompt: 'prompt',
+          schema: outputSchema,
+        });
+
+        await promise.catch((err) => {
+          expect(err.kind).toBe('server_error');
+        });
+      });
+
+      it('classifies 4xx statuses other than 429 (e.g. 401) as client_error', async () => {
+        invoke.mockRejectedValue(fetchError(401));
+        const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+        const promise = provider.generateStructuredOutput({
+          systemInstruction: 'sys',
+          prompt: 'prompt',
+          schema: outputSchema,
+        });
+
+        await promise.catch((err) => {
+          expect(err.kind).toBe('client_error');
+        });
       });
     });
 

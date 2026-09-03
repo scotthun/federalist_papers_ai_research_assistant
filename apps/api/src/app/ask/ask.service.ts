@@ -1,6 +1,10 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { ProviderUnavailableError, type AIProvider } from '@federalist-research/ai';
+import {
+  ProviderUnavailableError,
+  type AIProvider,
+  type ProviderFailureKind,
+} from '@federalist-research/ai';
 import {
   DEFAULT_TOP_K,
   getAllChunksForPaper,
@@ -36,13 +40,80 @@ export const REFUSE_MESSAGE =
   "I couldn't find sufficient evidence in the Federalist Papers to answer that confidently.";
 
 /** Used instead of `REFUSE_MESSAGE` when the fail-safe-to-refuse outcome was caused by the AI
- *  provider itself being unreachable/overloaded (a `ProviderUnavailableError`, e.g. a 503 "high
- *  demand" response) on both the first attempt and the one retry -- never for a citation-
+ *  provider itself failing on both the first attempt and the one retry -- never for a citation-
  *  verification failure or malformed response the provider *did* return. `REFUSE_MESSAGE`'s
- *  wording ("I couldn't find sufficient evidence") is misleading for this cause: it implies a
- *  content/evidence problem when the real cause is that the model was never actually reached. */
+ *  wording ("I couldn't find sufficient evidence") is misleading for any of these causes: it
+ *  implies a content/evidence problem when the real cause is that the model was never actually
+ *  reached, or rejected the request outright.
+ *
+ * 2026-09-03 second follow-up: a single generic message here used to cover every provider
+ * failure alike, but a 429 daily-quota exhaustion and a 503 overload are not the same problem --
+ * "try again in a moment" is actively wrong for a quota that won't reset for hours. One message
+ * per `ProviderFailureKind` instead, keyed by `messageForFailureKind` below. */
 export const PROVIDER_UNAVAILABLE_MESSAGE =
   "The AI model is temporarily unavailable (it's experiencing high demand right now) -- please try asking again in a moment.";
+
+const RATE_LIMITED_DAILY_MESSAGE =
+  "This AI model has hit its free-tier daily request limit. It won't recover until the quota resets (typically within 24 hours) -- retrying now won't help; please try again later.";
+
+function rateLimitedShortMessage(retryAfterSeconds?: number): string {
+  const wait =
+    retryAfterSeconds !== undefined ? `about ${retryAfterSeconds}s` : 'a few seconds';
+  return `The AI model is being rate-limited right now -- please wait ${wait} and try asking again.`;
+}
+
+const SERVER_ERROR_MESSAGE =
+  'The AI provider hit an internal error on its own end (not related to your question) -- please try asking again shortly.';
+
+const CLIENT_ERROR_MESSAGE =
+  "There's a configuration problem with the AI provider connection (not something your question caused) -- this needs a developer to look at, not a retry.";
+
+/** Picks the actual answer text for a fail-safe-to-refuse outcome. `kind`/`retryAfterSeconds`
+ *  are `undefined` for the original "the provider returned a response but citation verification
+ *  rejected it" case, which still gets the unchanged `REFUSE_MESSAGE` -- never any of the
+ *  provider-failure wording below. */
+function messageForFailureKind(kind?: ProviderFailureKind, retryAfterSeconds?: number): string {
+  switch (kind) {
+    case 'rate_limited_daily':
+      return RATE_LIMITED_DAILY_MESSAGE;
+    case 'rate_limited_short':
+      return rateLimitedShortMessage(retryAfterSeconds);
+    case 'server_error':
+      return SERVER_ERROR_MESSAGE;
+    case 'client_error':
+      return CLIENT_ERROR_MESSAGE;
+    case 'overloaded':
+    case 'unavailable':
+      return PROVIDER_UNAVAILABLE_MESSAGE;
+    case undefined:
+      return REFUSE_MESSAGE;
+  }
+}
+
+/** Priority order (most to least specific/actionable) for picking one `ProviderFailureKind` when
+ *  the first attempt and the retry failed with *different* kinds -- e.g. the first hit a daily
+ *  quota and the retry (pointlessly) hit it again framed differently, or one was a transient 503
+ *  and the other a genuine config error. Telling the user about the more specific/blocking cause
+ *  is always at least as true and more useful than the vaguer one. */
+const FAILURE_KIND_PRIORITY: ProviderFailureKind[] = [
+  'rate_limited_daily',
+  'client_error',
+  'rate_limited_short',
+  'server_error',
+  'overloaded',
+  'unavailable',
+];
+
+function pickMoreSpecificFailureKind(
+  a?: ProviderFailureKind,
+  b?: ProviderFailureKind,
+): ProviderFailureKind | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  const aRank = FAILURE_KIND_PRIORITY.indexOf(a);
+  const bRank = FAILURE_KIND_PRIORITY.indexOf(b);
+  return aRank <= bRank ? a : b;
+}
 
 /** The one shape ever produced by `AskService.ask` before `confidence`/`insufficientEvidence` are
  *  folded into the final `Answer` response -- kept separate from `Answer` itself only so `error`
@@ -65,9 +136,13 @@ interface AnswerOutcome {
   retried?: boolean;
 }
 
-function refuseOutcome(error?: string, providerUnavailable = false): AnswerOutcome {
+function refuseOutcome(
+  error?: string,
+  failureKind?: ProviderFailureKind,
+  retryAfterSeconds?: number,
+): AnswerOutcome {
   return {
-    answer: providerUnavailable ? PROVIDER_UNAVAILABLE_MESSAGE : REFUSE_MESSAGE,
+    answer: messageForFailureKind(failureKind, retryAfterSeconds),
     citations: [],
     confidence: 'low',
     insufficientEvidence: true,
@@ -146,10 +221,13 @@ interface GenerateAttempt {
   answer: string;
   citations: Citation[];
   errorMessage?: string;
-  /** `true` only when `errorMessage` came from a `ProviderUnavailableError` -- the call itself
-   *  never reached a response (network/rate-limit/5xx), as opposed to a response the provider
-   *  did return that failed schema validation. Meaningless when `errorMessage` is `undefined`. */
-  providerUnavailable?: boolean;
+  /** Set only when `errorMessage` came from a `ProviderUnavailableError` -- the call itself
+   *  never reached a usable response (network/rate-limit/5xx/4xx), as opposed to a response the
+   *  provider did return that failed schema validation (which leaves this `undefined`). */
+  providerFailureKind?: ProviderFailureKind;
+  /** Only meaningful alongside `providerFailureKind: 'rate_limited_short'` -- the provider's own
+   *  suggested wait, when it supplied one. */
+  retryAfterSeconds?: number;
 }
 
 /**
@@ -358,7 +436,7 @@ export class AskService {
       buildInvalidOutputCorrection(first.errorMessage),
       `first attempt produced invalid output: ${first.errorMessage}`,
       currentPaper,
-      first.providerUnavailable,
+      first.providerFailureKind,
     );
   }
 
@@ -369,11 +447,11 @@ export class AskService {
     correction: string,
     firstFailureReason: string,
     currentPaper?: CurrentPaper,
-    /** Whether the *first* attempt's own failure (if it had one) was a `ProviderUnavailableError`
-     *  -- `undefined`/`false` when the first attempt actually produced a response (e.g. this was
-     *  called for a citation-verification failure instead). Combined with the retry's own outcome
-     *  below to decide the final refuse message's wording. */
-    firstProviderUnavailable?: boolean,
+    /** The *first* attempt's own `ProviderFailureKind` (if it had one) -- `undefined` when the
+     *  first attempt actually produced a response (e.g. this was called for a citation-
+     *  verification failure instead). Combined with the retry's own outcome below to decide the
+     *  final refuse message's wording. */
+    firstFailureKind?: ProviderFailureKind,
   ): Promise<AnswerOutcome> {
     const retry = await this.tryGenerate(question, chunks, correction, currentPaper);
     if (retry.errorMessage === undefined) {
@@ -392,7 +470,7 @@ export class AskService {
       }
       // The retry *did* produce a response here, just one that still failed citation
       // verification -- a data-quality refuse, not a provider outage, regardless of whether the
-      // first attempt happened to be a ProviderUnavailableError.
+      // first attempt was itself a provider failure.
       const retryFailureDetail =
         retry.citations.length === 0
           ? 'retry also returned zero citations'
@@ -400,14 +478,16 @@ export class AskService {
       return refuseOutcome(`${firstFailureReason}; ${retryFailureDetail}`);
     }
 
-    // Neither attempt produced a usable response -- if either one's failure was the provider
-    // itself being unreachable/overloaded, say so honestly instead of implying an evidence
-    // problem (`decisions.md`'s "Confidence tiering" citation-verification safety net still
-    // applies either way: this is only about which message text is shown, never about skipping
-    // verification).
+    // Neither attempt produced a usable response -- if either one's failure was a genuine
+    // provider-side failure, say so honestly (and specifically -- a daily quota is not the same
+    // problem as a transient overload) instead of implying an evidence problem (`decisions.md`'s
+    // "Confidence tiering" citation-verification safety net still applies either way: this is
+    // only about which message text is shown, never about skipping verification).
+    const failureKind = pickMoreSpecificFailureKind(firstFailureKind, retry.providerFailureKind);
     return refuseOutcome(
       `${firstFailureReason}; retry also failed: ${retry.errorMessage}`,
-      firstProviderUnavailable === true || retry.providerUnavailable === true,
+      failureKind,
+      retry.retryAfterSeconds,
     );
   }
 
@@ -429,7 +509,10 @@ export class AskService {
         answer: '',
         citations: [],
         errorMessage: err instanceof Error ? err.message : String(err),
-        providerUnavailable: err instanceof ProviderUnavailableError,
+        providerFailureKind:
+          err instanceof ProviderUnavailableError ? err.kind : undefined,
+        retryAfterSeconds:
+          err instanceof ProviderUnavailableError ? err.retryAfterSeconds : undefined,
       };
     }
   }

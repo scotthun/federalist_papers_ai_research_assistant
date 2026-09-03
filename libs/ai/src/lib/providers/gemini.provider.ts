@@ -1,6 +1,95 @@
 import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import type { ZodType } from 'zod';
-import { ProviderUnavailableError, type AIProvider } from '../ai-provider.interface';
+import {
+  ProviderUnavailableError,
+  type AIProvider,
+  type ProviderFailureKind,
+} from '../ai-provider.interface';
+
+/** Loose shape of the `@google/generative-ai` SDK's `GoogleGenerativeAIFetchError` -- imported as
+ *  a type-only structural check rather than the real class (which `@langchain/google-genai`
+ *  re-throws verbatim, confirmed live: its own `completionWithRetry` only ever `throw`s the same
+ *  object it caught, occasionally patching `.status`). Declared locally instead of depending on
+ *  `@google/generative-ai` directly -- that package is `@langchain/google-genai`'s own transitive
+ *  dependency, never a direct one of this lib's, and this shape is all `classifyFetchError` below
+ *  actually needs from it. */
+interface GoogleGenerativeAIFetchErrorShape {
+  status?: number;
+  errorDetails?: Array<{ '@type'?: string; [key: string]: unknown }>;
+}
+
+function isFetchErrorShape(err: unknown): err is GoogleGenerativeAIFetchErrorShape {
+  return typeof err === 'object' && err !== null && 'status' in err;
+}
+
+/** Parses a `RetryInfo` detail's `retryDelay` (e.g. `"18s"`, `"1.5s"`) into whole seconds,
+ *  rounding up so a caller never under-waits. `undefined` when absent/unparseable. */
+function parseRetryAfterSeconds(
+  errorDetails: GoogleGenerativeAIFetchErrorShape['errorDetails'],
+): number | undefined {
+  const retryInfo = errorDetails?.find(
+    (detail) => detail['@type'] === 'type.googleapis.com/google.rpc.RetryInfo',
+  );
+  const retryDelay = retryInfo?.['retryDelay'];
+  if (typeof retryDelay !== 'string') {
+    return undefined;
+  }
+  const seconds = Number.parseFloat(retryDelay.replace(/s$/, ''));
+  return Number.isFinite(seconds) ? Math.ceil(seconds) : undefined;
+}
+
+/** `true` when a 429's `QuotaFailure` detail names a *per-day* quota (e.g.
+ *  `GenerateRequestsPerDayPerProjectPerModel-FreeTier`) rather than a shorter-window one --
+ *  the distinction that actually matters to a user ("come back tomorrow" vs "wait a few
+ *  seconds"), confirmed live 2026-09-03 against a real 20-requests/day free-tier rejection. */
+function isDailyQuota(errorDetails: GoogleGenerativeAIFetchErrorShape['errorDetails']): boolean {
+  const quotaFailure = errorDetails?.find(
+    (detail) => detail['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure',
+  );
+  const violations = quotaFailure?.['violations'];
+  if (!Array.isArray(violations)) {
+    return false;
+  }
+  return violations.some(
+    (violation) =>
+      typeof violation === 'object' &&
+      violation !== null &&
+      typeof (violation as { quotaId?: unknown }).quotaId === 'string' &&
+      /PerDay/i.test((violation as { quotaId: string }).quotaId),
+  );
+}
+
+/** Classifies a caught error into a `ProviderFailureKind` + optional retry hint, from whatever
+ *  HTTP status/error-detail metadata is available -- `err` may not even be a real HTTP error at
+ *  all (a plain network failure/timeout has no `.status`), so every field here is read
+ *  defensively rather than assumed present. */
+function classifyFetchError(err: unknown): {
+  kind: ProviderFailureKind;
+  retryAfterSeconds?: number;
+} {
+  if (!isFetchErrorShape(err) || err.status === undefined) {
+    return { kind: 'unavailable' };
+  }
+  const { status, errorDetails } = err;
+  if (status === 429) {
+    return {
+      kind: isDailyQuota(errorDetails) ? 'rate_limited_daily' : 'rate_limited_short',
+      retryAfterSeconds: parseRetryAfterSeconds(errorDetails),
+    };
+  }
+  if (status === 503) {
+    return { kind: 'overloaded' };
+  }
+  if (status >= 500) {
+    return { kind: 'server_error' };
+  }
+  // Any other 4xx (400 malformed request, 401/403 auth/permission) -- a configuration/
+  // programming problem, not something transient. Still classified (not rethrown as-is): the
+  // confident tier's own documented contract is "never throws, always fails safe to refuse"
+  // (this story's Boundaries) -- this just makes sure the refuse message tells the truth about
+  // *why* instead of implying "high demand" for what's actually a broken setup.
+  return { kind: 'client_error' };
+}
 
 // Verified live against the Gemini API (Story 0.1 spike, 2026-08-24): gemini-embedding-001
 // returns 3072-dimensional embeddings by default. libs/database's `document_chunks.embedding`
@@ -92,12 +181,15 @@ export class GeminiProvider implements AIProvider {
         ['human', params.prompt],
       ]);
     } catch (err) {
-      // The call itself failed (network error, rate limit, 5xx/"high demand") -- the provider
-      // never actually produced a response for us to reject, which is a materially different
-      // failure than the schema-validation throw below (a response we didn't like). Wrapped in
-      // ProviderUnavailableError so callers can tell them apart and message users honestly.
+      // The call itself failed (network error, rate limit, 5xx/"high demand", or a 4xx like an
+      // invalid API key) -- the provider never actually produced a response for us to reject,
+      // which is a materially different failure than the schema-validation throw below (a
+      // response we didn't like). Wrapped in ProviderUnavailableError, classified by kind, so
+      // callers can tell a daily quota apart from a transient overload and message users
+      // honestly instead of one generic bucket (2026-09-03).
       const message = err instanceof Error ? err.message : String(err);
-      throw new ProviderUnavailableError(message, err);
+      const { kind, retryAfterSeconds } = classifyFetchError(err);
+      throw new ProviderUnavailableError(message, kind, err, retryAfterSeconds);
     }
 
     // Zod's own SafeParseReturnType (a discriminated union on `success`), narrowed on its own

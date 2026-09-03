@@ -200,6 +200,19 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 - Citation verification and the one-retry-then-fail-safe policy -- this only changes which message text a fail-safe outcome shows, never whether/how verification runs.
 - `REFUSE_MESSAGE` itself, and its use for a genuine "the retry got a response but it wasn't grounded" case -- `PROVIDER_UNAVAILABLE_MESSAGE` is used only when neither attempt ever produced a usable response at all.
 
+### 2026-09-03 — Fourth follow-up: classify provider failures by HTTP status, not one generic bucket (still not Story-5.2-scoped)
+
+**Triggering finding:** The single `ProviderUnavailableError`/`PROVIDER_UNAVAILABLE_MESSAGE` from the third follow-up got its own reality check within the hour: a genuine `429 Too Many Requests` (a hard 20-requests/day free-tier quota for `gemini-3.6-flash`, confirmed via the response body's `quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier`) produced the same "high demand... try again in a moment" wording as a `503`. That's actively wrong advice for a daily quota -- it won't recover in "a moment."
+
+**What was amended:** `libs/ai` gained `ProviderFailureKind` (`rate_limited_daily` | `rate_limited_short` | `overloaded` | `server_error` | `client_error` | `unavailable`) and a classifier in `GeminiProvider` that reads the real `GoogleGenerativeAIFetchError` shape (`.status`, `.errorDetails` -- confirmed by reading `@langchain/google-genai`'s source: it rethrows the SDK's own error object verbatim, never wraps or strips it) to pick one. `AskService` now picks a distinct message per kind, and -- when the first attempt and the retry fail with *different* kinds -- prefers whichever is more specific/actionable (a daily quota outranks a mere overload, since telling the user "come back tomorrow" is strictly more useful than "try again shortly" when both are technically true).
+
+**Known-bad state avoided:** A user told to retry "in a moment" when the actual problem won't resolve for hours, or a genuine configuration bug (e.g. a bad API key, 401/403) being described as "high demand" when a retry will never help and a developer needs to look at it instead.
+
+**KEEP -- preserved unchanged, re-derive around these:**
+- Everything from the third follow-up above -- this refines *which message*, not the overall "provider failure gets an honest message" mechanism.
+- `REFUSE_MESSAGE` for the citation-verification-only case -- completely unaffected; `ProviderFailureKind` is `undefined` on that path, same as before.
+- Citation verification itself -- unaffected regardless of failure kind.
+
 ## Design Notes
 
 **Why a Context instead of prop-drilling or a new fetch:** `QuillWidget` is mounted once at the root layout, as a sibling of `{children}` — it has no props and no relationship to whatever page is currently rendered inside `{children}`. `PaperReaderPage` is an async Server Component that already knows the paper's number/title from its own server-side fetch. Rather than inventing a client-fetchable `/api/papers/[paperNumber]` route so the widget could re-fetch that same data (a real network round trip for data the page already has, and a route Story 5.1 deliberately chose not to build), a small React Context lets the page *tell* the widget what it already knows. `AnnouncePaperContext` is a separate file specifically because `page.tsx`'s default export is an async Server Component — a file can't mix a `'use client'` directive with that.
@@ -302,3 +315,19 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 **Verification performed:** `npx nx test ai` (15/15 passing), `npx nx test api` (200/200 passing, 17 suites), `npx nx lint ai`/`npx nx lint api` (0 errors), `npx nx build api` (succeeds, transitively type-checks `libs/ai`).
 
 **Residual risk:** No frontend change was needed (the message flows through the existing `answer` text field), so nothing to re-verify there. Live re-verification against a real Gemini 503 is inherently opportunistic (can't be forced on demand) -- the mechanism is unit-tested directly instead.
+
+## Auto Run Result — Round 6 (Fourth follow-up, 2026-09-03: classify provider failures by status code)
+
+**Summary:** A live 429 (daily quota) got the exact same message as a 503 (overload) from Round 5's fix -- wrong advice for the quota case. Added `ProviderFailureKind` classification (reading the real `GoogleGenerativeAIFetchError`'s `.status`/`.errorDetails`) so `AskService` shows distinct, accurate messages for a daily quota, a short-window rate limit (with the provider's own retry-delay hint when available), a generic 5xx, a 4xx config/auth problem, and a plain network failure -- picking the more specific kind when the first attempt and retry differ.
+
+**Files changed:**
+- `libs/ai/src/lib/ai-provider.interface.ts` -- new exported `ProviderFailureKind`; `ProviderUnavailableError` gained `kind`/`retryAfterSeconds`.
+- `libs/ai/src/lib/providers/gemini.provider.ts` -- new `classifyFetchError` (status → kind, `RetryInfo`/`QuotaFailure` detail parsing); the catch site now constructs `ProviderUnavailableError` with the classified kind.
+- `libs/ai/src/lib/providers/gemini.provider.spec.ts` -- new `describe('error classification...')` covering all six kinds plus the missing-details/no-status fallbacks.
+- `apps/api/src/app/ask/ask.service.ts` -- five new kind-specific messages (`RATE_LIMITED_DAILY_MESSAGE`, `rateLimitedShortMessage()`, `SERVER_ERROR_MESSAGE`, `CLIENT_ERROR_MESSAGE`, plus the existing `PROVIDER_UNAVAILABLE_MESSAGE` now reserved for `overloaded`/`unavailable`); `GenerateAttempt`/`refuseOutcome`/`tryGenerate`/`answerConfidently`/`retryOrFailSafe` thread `ProviderFailureKind` instead of a boolean; new `pickMoreSpecificFailureKind` resolves a first-attempt/retry kind mismatch.
+- `apps/api/src/app/ask/ask.service.spec.ts` -- rewrote the provider-failure tests for the new kind-aware messages; added cases for each kind and the priority-picking behavior.
+- Also (user-requested, same investigation): `libs/ai`'s `GeminiProviderOptions.generationModel` / `GEMINI_GENERATION_MODEL` env var (already landed in Round 5's commit sequence, not repeated here) let the model itself be swapped without editing source -- directly useful for testing whether a different model's free-tier quota/reliability is better.
+
+**Verification performed:** `npx nx test ai` (23/23 passing), `npx nx test api` (205/205 passing, 17 suites), `npx nx lint ai`/`npx nx lint api` (0 errors), `npx nx build api` (succeeds).
+
+**Residual risk:** Same as Round 5 -- live re-verification against a real 429/503/etc. is opportunistic, not forceable on demand; the classifier is unit-tested directly against constructed error shapes matching the real SDK's `GoogleGenerativeAIFetchError` instead.

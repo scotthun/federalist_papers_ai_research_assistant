@@ -205,10 +205,10 @@ describe('AskService', () => {
     // wrongly implies a content/evidence problem when the real cause is that the AI provider
     // itself was never reached (e.g. a 503 "high demand" response) -- confusing given the
     // question and evidence were both fine. PROVIDER_UNAVAILABLE_MESSAGE says so honestly.
-    it('shows PROVIDER_UNAVAILABLE_MESSAGE (not REFUSE_MESSAGE) when both attempts fail because the AI provider itself is unavailable', async () => {
+    it('shows PROVIDER_UNAVAILABLE_MESSAGE (not REFUSE_MESSAGE) when both attempts fail with an "overloaded" provider failure', async () => {
       const aiProvider = fakeAiProvider();
       (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
-        new ProviderUnavailableError('503 Service Unavailable: high demand'),
+        new ProviderUnavailableError('503 Service Unavailable: high demand', 'overloaded'),
       );
       const { service } = buildService(
         [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
@@ -227,7 +227,7 @@ describe('AskService', () => {
     it('shows PROVIDER_UNAVAILABLE_MESSAGE when only the first attempt is a provider failure but the retry still fails a different way', async () => {
       const aiProvider = fakeAiProvider();
       (aiProvider.generateStructuredOutput as jest.Mock)
-        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable'))
+        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable', 'overloaded'))
         .mockRejectedValueOnce(new Error('Gemini returned no text response'));
       const { service } = buildService(
         [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
@@ -239,10 +239,102 @@ describe('AskService', () => {
       expect(result.answer).toBe(PROVIDER_UNAVAILABLE_MESSAGE);
     });
 
+    // 2026-09-03 second follow-up: a single generic "provider unavailable" bucket used to cover
+    // every failure alike -- confusingly, since a 429 daily-quota exhaustion and a 503 overload
+    // need very different user-facing advice ("come back tomorrow" vs "try again in a moment").
+    it('shows the daily-quota-specific message for a 429 whose QuotaFailure detail names a per-day quota', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError(
+          '429 Too Many Requests: quota exceeded',
+          'rate_limited_daily',
+        ),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('daily request limit');
+      expect(result.answer).not.toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+      expect(result.answer).not.toBe(REFUSE_MESSAGE);
+    });
+
+    it('shows a wait-and-retry message (including the provider-supplied delay) for a short-window 429', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError(
+          '429 Too Many Requests',
+          'rate_limited_short',
+          undefined,
+          18,
+        ),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('rate-limited');
+      expect(result.answer).toContain('18s');
+    });
+
+    it('shows a distinct message for a genuine 5xx server error (not the 503 "high demand" wording)', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError('500 Internal Server Error', 'server_error'),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('internal error');
+      expect(result.answer).not.toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+    });
+
+    it("shows a configuration-problem message for a 4xx that isn't a rate limit (e.g. a bad API key), telling the user a retry won't help", async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError('401 Unauthorized', 'client_error'),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('configuration problem');
+    });
+
+    it('prefers the more specific/actionable failure kind when the first attempt and the retry fail with different kinds (daily quota beats a mere overload)', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable', 'overloaded'))
+        .mockRejectedValueOnce(
+          new ProviderUnavailableError('429 Too Many Requests', 'rate_limited_daily'),
+        );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('daily request limit');
+    });
+
     it('still shows REFUSE_MESSAGE (not the provider-unavailable wording) when the retry succeeds in getting a response that just fails citation verification', async () => {
       const aiProvider = fakeAiProvider();
       (aiProvider.generateStructuredOutput as jest.Mock)
-        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable'))
+        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable', 'overloaded'))
         .mockResolvedValueOnce({
           answer: 'A response with a fabricated citation.',
           citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
