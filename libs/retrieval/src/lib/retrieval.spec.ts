@@ -1,6 +1,6 @@
 import type { AIProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
-import { retrieveRelevantChunks } from './retrieval';
+import { getAllChunksForPaper, retrieveRelevantChunks } from './retrieval';
 
 /**
  * Pure-JS unit coverage for `retrieveRelevantChunks`'s composition logic (embedding call,
@@ -185,5 +185,33 @@ describe('retrieveRelevantChunks', () => {
     const result = await retrieveRelevantChunks(dataSource, aiProvider, 'query');
 
     expect(result[0].score).toBe(-0.42);
+  });
+});
+
+describe('getAllChunksForPaper', () => {
+  it('returns every row for the given paperNumber without embedding anything or needing an AIProvider', async () => {
+    const { dataSource, query } = fakeDataSource([
+      { chunkId: 'chunk-1', paperNumber: 51, paperTitle: 'Federalist No. 51', content: 'First.' },
+      { chunkId: 'chunk-2', paperNumber: 51, paperTitle: 'Federalist No. 51', content: 'Second.' },
+    ]);
+
+    const result = await getAllChunksForPaper(dataSource, 51);
+
+    expect(result).toEqual([
+      { chunkId: 'chunk-1', paperNumber: 51, paperTitle: 'Federalist No. 51', content: 'First.', score: 1 },
+      { chunkId: 'chunk-2', paperNumber: 51, paperTitle: 'Federalist No. 51', content: 'Second.', score: 1 },
+    ]);
+    expect(query).toHaveBeenCalledTimes(1);
+    const [sql, params] = query.mock.calls[0];
+    expect(params).toEqual([51]);
+    expect(sql).toMatch(/WHERE paper\.paper_number = \$1/);
+    expect(sql).toMatch(/ORDER BY chunk\.chunk_index/);
+    expect(sql).not.toMatch(/embedding/i);
+  });
+
+  it('returns an empty array when the paper has no chunks', async () => {
+    const { dataSource } = fakeDataSource([]);
+
+    await expect(getAllChunksForPaper(dataSource, 999)).resolves.toEqual([]);
   });
 });

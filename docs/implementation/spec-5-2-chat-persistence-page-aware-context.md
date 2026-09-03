@@ -94,7 +94,7 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 - `apps/api/src/app/ask/ask.controller.ts` -- add `paperNumber?: unknown`/`paperTitle?: unknown` to `AskRequestBody` (line 8-10); in `ask()` (line 33), coerce both (`Number.isInteger(body.paperNumber) && body.paperNumber > 0`; `typeof body.paperTitle === 'string'` non-empty after trim) -- only when **both** are valid, build a `currentPaper: { paperNumber, title }` object, else `undefined` -- and pass as a second argument: `this.askService.ask(trimmedQuestion, currentPaper)`.
 - `apps/api/src/app/ask/ask.service.ts` -- `AskService.ask` (line 164) gains an optional `currentPaper?: { paperNumber: number; title: string }` second parameter, threaded through `resolveOutcome`/`answerConfidently`/`tryGenerate` into `buildAnswerPrompt`'s new parameter (below) -- **not** into `retrieveRelevantChunks`'s options, which stays exactly `{ topK: TOP_K }` (product correction, 2026-09-02 -- the original version of this line threaded it into the retrieval filter instead; see Spec Change Log).
 - `apps/api/src/app/ask/answer-prompt.ts` -- `buildAnswerPrompt` (line 42) gains an optional fourth parameter `currentPaper?: { paperNumber: number; title: string }`; when present, prepend a short contextual note to the prompt (e.g. "The user is currently reading Federalist No. {N}: \"{title}\". This is context only -- you may still answer using evidence from any paper if that's the better answer.") before the `QUESTION:` line.
-- `libs/retrieval/src/lib/retrieval.ts` -- read-only reuse of `RetrieveOptions`/`retrieveRelevantChunks`, unchanged; this story deliberately does not call its `paperNumber` filter option at all.
+- `libs/retrieval/src/lib/retrieval.ts` -- `RetrieveOptions`/`retrieveRelevantChunks` unchanged; this story deliberately does not call its `paperNumber` filter option at all. **2026-09-03 follow-up:** new exported `getAllChunksForPaper(dataSource, paperNumber)` -- a plain SQL lookup (no embedding, no `AIProvider`) returning every chunk for a paper in `chunk_index` order, `score` always `1` (a placeholder, never a real similarity value).
 - `apps/web/src/app/global.css` -- reuse existing `--color-quill-surface-chip`/`--color-quill-accent-gold`/`--color-quill-ink-secondary` tokens (already added in Story 5.1) for the chip; no new tokens expected.
 - `apps/web/specs/components/quill/quill-widget.spec.tsx` -- extend with persistence (write-skipped-while-streaming, restore-and-sanitize-on-mount) and chip-dismissal-reset-on-paper-change cases.
 - New: `apps/web/specs/components/quill/paper-context.spec.tsx` -- covers `PaperContextProvider`/`usePaperContext()` defaults and updates, and `AnnouncePaperContext`'s mount/update/unmount behavior together (tightly coupled, kept in one file).
@@ -141,6 +141,19 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 - The chip's rendering, visible copy, and `aria-label="Remove paper context"` -- UX review confirmed these already read as context, not a scope lock; do not reword.
 - The chip-dismissal-resets-on-paper-change mechanism (the render-time state adjustment, not the earlier `useEffect` version already patched out in the prior review pass) -- unchanged; dismissal still means "don't send this paper's context," just no longer "don't filter by it."
 - All of Story 5.1's untouched surfaces (streaming, citation verification, citation navigation) -- this correction only touches the current-paper-context plumbing.
+
+### 2026-09-03 — Follow-up: pin the current paper's full content as extra evidence
+
+**Triggering finding:** Manual testing of the 2026-09-02 correction surfaced a real gap: a vague, low-signal question ("give me a TLDR", "summarize this paper") asked while the context chip is showing had *nothing* anchoring its embedding-similarity search to the paper actually being read -- one real example retrieved five completely unrelated papers, with the current paper absent from the results entirely. The hard filter this story removed had accidentally been a crutch for exactly this weak-signal case (a `WHERE paper_number = N` guarantees the current paper's chunks come back no matter how generic the question is); removing it exposed that semantic search alone doesn't handle "summarize whatever I'm looking at" well.
+
+**What was amended:** Rather than resurrecting a filter (or a second *ranked* similarity search, which would need its own embedding call -- another dependency on the same Gemini endpoint that was independently observed 503-ing under load during this session), `libs/retrieval` gained a new `getAllChunksForPaper(dataSource, paperNumber)` -- a plain SQL lookup, no embedding, no `AIProvider` call at all, returning every chunk for that paper in reading order. `AskService.ask` now calls it, and appends its result to the evidence set, whenever `currentPaper` is set and that paper *didn't* already appear in the unrestricted top-K on its own merits. The tier decision (`chunks[0]?.score`) is captured **before** this append, specifically so the pinned chunks' placeholder `score: 1` (there's nothing to rank them against) can never look like the best match and wrongly promote a low-signal question to the confident tier.
+
+**Known-bad state avoided:** A user asking about the paper they're visibly looking at getting an answer sourced from five unrelated papers, or a confident-sounding answer that's secretly ungrounded because a placeholder score leaked into the tier decision.
+
+**KEEP -- preserved unchanged, re-derive around these:**
+- Everything from the 2026-09-02 entry above -- this is additive on top of it, not a reversal.
+- The unrestricted `retrieveRelevantChunks` call and its role in the tier decision -- a cross-paper question with real semantic signal continues to work exactly as before; pinning only adds evidence, it never removes or reorders the unrestricted results.
+- Citation verification -- pinned chunks are just as real/`chunkId`-verified as unrestricted ones once appended; no separate trust path was introduced for them.
 
 ## Review Triage Log
 
@@ -222,3 +235,17 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 **Verification performed:** `npx nx test web` (96/96 passing), `npx nx test api` (189/189 passing), `npx nx lint web`/`npx nx lint api` (0 errors), `npx nx build web` (succeeds).
 
 **Residual risk:** Real end-to-end confirmation that a cross-paper question gets correctly answered/cited while the chip is showing was not run against a live LLM in this session -- only unit-level prompt-text assertions confirm the contextual note is present and worded as non-restrictive.
+
+## Auto Run Result — Round 3 (Follow-up, 2026-09-03: pin current paper as extra evidence)
+
+**Summary:** Manual live testing of Round 2 surfaced a real gap -- a vague question ("give me a TLDR") while the chip was showing retrieved five unrelated papers, missing the current paper entirely. Fixed by pinning the current paper's full content (via a new, embedding-free `getAllChunksForPaper` lookup) as extra evidence whenever it doesn't already appear in the unrestricted top-K -- additive only, tier decision still based solely on the unrestricted search's own top score.
+
+**Files changed:**
+- `libs/retrieval/src/lib/retrieval.ts` -- new exported `getAllChunksForPaper(dataSource, paperNumber)`.
+- `libs/retrieval/src/lib/retrieval.spec.ts` -- new unit tests for it.
+- `apps/api/src/app/ask/ask.service.ts` -- `ask()` now pins the current paper's chunks (best-effort; a failure here degrades to the unrestricted results alone) when it's missing from the unrestricted results; tier is captured before pinning so the pinned chunks' placeholder `score: 1` can never inflate it.
+- `apps/api/src/app/ask/ask.service.spec.ts` -- new tests: pinned chunks reach the LLM and can be cited; the placeholder score never promotes the tier; no second lookup when the paper's already present; graceful degradation on lookup failure.
+
+**Verification performed:** `npx nx test api` (193/193 passing), `npx nx test web`/`npx nx test retrieval` (cached green, unaffected), `npx nx lint api`/`npx nx lint retrieval` (0 errors), `npx nx build api` (succeeds).
+
+**Residual risk:** Not yet re-verified live in the browser against the actual running app after this change (pending).

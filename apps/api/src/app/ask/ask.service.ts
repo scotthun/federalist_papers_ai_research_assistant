@@ -3,6 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import type { AIProvider } from '@federalist-research/ai';
 import {
   DEFAULT_TOP_K,
+  getAllChunksForPaper,
   retrieveRelevantChunks,
   type RetrievedChunk,
 } from '@federalist-research/retrieval';
@@ -189,8 +190,39 @@ export class AskService {
       throw err;
     }
 
+    // Tier is decided from the unrestricted search's own best match, captured here -- before any
+    // pinned-paper chunks below are appended -- so pinning can never inflate (or otherwise
+    // change) the confidence tier. A paper that didn't rank in the unrestricted top-K by
+    // definition can't have scored higher than this.
     const topScore = chunks[0]?.score;
     const tier = decideAnswerTier(topScore);
+
+    // Pin the current paper's own full content as extra evidence when it didn't already make
+    // the unrestricted top-K on its own merits (2026-09-03 follow-up to the product correction
+    // above): a vague, low-signal question ("summarize this paper", "give me a TLDR") otherwise
+    // has nothing anchoring it to the paper the user is actually reading, since retrieval no
+    // longer filters by it. Unlike retrieveRelevantChunks, getAllChunksForPaper needs no
+    // embedding/AIProvider call at all -- it's a plain lookup, so there's nothing here for a
+    // flaky LLM provider to fail. Best-effort: a failure here degrades to just the unrestricted
+    // results rather than failing the whole question over an enhancement.
+    if (
+      currentPaper &&
+      !chunks.some((chunk) => chunk.paperNumber === currentPaper.paperNumber)
+    ) {
+      try {
+        const pinnedChunks = await getAllChunksForPaper(
+          this.dataSource,
+          currentPaper.paperNumber,
+        );
+        chunks = [...chunks, ...pinnedChunks];
+      } catch (err) {
+        this.logger.warn(
+          `Failed to pin current paper ${currentPaper.paperNumber}'s chunks as extra context: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     const outcome = await this.resolveOutcome(tier, question, chunks, currentPaper);
 

@@ -517,6 +517,130 @@ describe('AskService', () => {
     });
   });
 
+  // 2026-09-03 follow-up: a vague, low-signal question ("give me a TLDR") has nothing anchoring
+  // it to the paper the user is actually reading now that the hard filter above is gone. Pinning
+  // the current paper's own full content as extra evidence (no embedding call -- a plain lookup,
+  // libs/retrieval's getAllChunksForPaper) closes that gap without reintroducing a filter.
+  describe('pinning the current paper as extra evidence (2026-09-03)', () => {
+    it('pins the current paper via a second, plain (non-embedding) lookup when it did not rank in the unrestricted results, and the LLM can cite it', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A summary grounded in the pinned paper.',
+        citations: [
+          { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+        ],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CONFIDENT_THRESHOLD }),
+        ])
+        .mockResolvedValueOnce([
+          {
+            chunkId: 'pinned-chunk-1',
+            paperNumber: 10,
+            paperTitle: 'The Same Subject Continued',
+            content: 'Pinned paper content.',
+          },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider);
+
+      const result = await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(query).toHaveBeenCalledTimes(2);
+      const [secondSql, secondParams] = query.mock.calls[1];
+      expect(secondParams).toEqual([10]);
+      expect(secondSql).not.toMatch(/embedding/i);
+
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).toContain('pinned-chunk-1');
+      expect(call.prompt).toContain('Pinned paper content.');
+      // The pinned chunk was part of the real, verified evidence set -- citing it succeeds
+      // rather than failing safe to a refuse-tier retry.
+      expect(result.confidence).toBe('high');
+      expect(result.citations).toEqual([
+        { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+      ]);
+    });
+
+    it("never promotes the tier using the pinned chunk's placeholder score -- the unrestricted search's own top score still decides confident/clarify/refuse", async () => {
+      const aiProvider = fakeAiProvider();
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'clarify-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD }),
+        ])
+        .mockResolvedValueOnce([
+          {
+            chunkId: 'pinned-chunk-1',
+            paperNumber: 10,
+            paperTitle: 'The Same Subject Continued',
+            content: 'Pinned paper content.',
+          },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider);
+
+      const result = await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      // Clarify tier makes no LLM call at all -- if the pinned chunk's score of 1 had leaked
+      // into the tier decision, this would have wrongly become 'confident' and called the LLM.
+      expect(aiProvider.generateStructuredOutput).not.toHaveBeenCalled();
+      expect(result.confidence).toBe('low');
+      expect(result.insufficientEvidence).toBe(true);
+    });
+
+    it('does not attempt a second lookup when the current paper already appears in the unrestricted results', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer.',
+        citations: [{ paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'chunk-1' }],
+      });
+      const { service, query } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 10, score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(query).toHaveBeenCalledTimes(1);
+    });
+
+    it('degrades gracefully (no thrown error) when the pinning lookup itself fails', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer from the unrestricted results alone.',
+        citations: [{ paperNumber: 51, paperTitle: 'The Structure of the Government', chunkId: 'chunk-1' }],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([fakeRow({ chunkId: 'chunk-1', paperNumber: 51, score: CONFIDENT_THRESHOLD })])
+        .mockRejectedValueOnce(new Error('pinning lookup failed'));
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider);
+
+      const result = await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(result.confidence).toBe('high');
+      expect(result.citations).toEqual([
+        { paperNumber: 51, paperTitle: 'The Structure of the Government', chunkId: 'chunk-1' },
+      ]);
+    });
+  });
+
   describe('embedding/retrieval failure', () => {
     it('propagates the error (never a fabricated 200 answer, never a hang)', async () => {
       const aiProvider = fakeAiProvider();
