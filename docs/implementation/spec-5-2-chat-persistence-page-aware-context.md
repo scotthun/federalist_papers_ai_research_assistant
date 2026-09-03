@@ -155,6 +155,20 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 - The unrestricted `retrieveRelevantChunks` call and its role in the tier decision -- a cross-paper question with real semantic signal continues to work exactly as before; pinning only adds evidence, it never removes or reorders the unrestricted results.
 - Citation verification -- pinned chunks are just as real/`chunkId`-verified as unrestricted ones once appended; no separate trust path was introduced for them.
 
+### 2026-09-03 — Second follow-up: force the confident tier when a specific paper is pinned
+
+**Triggering finding:** Live testing of the pinning follow-up above surfaced that pinning alone wasn't enough: a meta/summary-style question ("give me a TLDR", "summarize this paper") structurally can't score well against `decideAnswerTier`'s archive-wide content-similarity gate, no matter which paper is pinned, because the question text doesn't resemble any passage's *content* -- it's a request about the *form* of the answer, not semantically close to the paper's subject matter. So these questions kept landing in `clarify`/`refuse`, where the LLM is never called at all, and the pinned evidence never got used.
+
+**What was amended:** `AskService.ask` now forces the tier to `confident` whenever `currentPaper` is set, regardless of the raw archive-wide score (`decideAnswerTier`'s own result, still computed and now logged separately as `retrievalTier`, purely for observability). This doesn't weaken `decisions.md`'s "Confidence tiering" principle (never trust the LLM's self-reported confidence) -- it swaps out *which* deterministic, code-decided signal gates the LLM call: the UI explicitly telling us which paper is relevant is a stronger signal than raw embedding similarity for exactly this class of question, and citation verification (the documented *actual* safety net) still applies unchanged -- a forced confident-tier attempt that can't produce a verified citation still fails safe to refuse, exactly like every other confident-tier attempt.
+
+**Known-bad state avoided:** A user on a specific paper's page asking a plain, ordinary question ("summarize this", "TLDR") and reliably getting a non-answer (a templated guess or a blanket refusal) instead of a real, grounded response -- defeating the entire point of pinning the paper's content in the first place.
+
+**KEEP -- preserved unchanged, re-derive around these:**
+- Everything from both entries above -- additive, not a reversal.
+- Pinning itself (`getAllChunksForPaper`, appended after the tier decision) -- unchanged; it's still what supplies the evidence the now-always-attempted LLM call needs.
+- Citation verification and the one-retry-then-fail-safe policy -- exercised identically regardless of how the confident tier was reached.
+- `clarifyOutcome`/`refuseOutcome` -- reverted to their original, `currentPaper`-unaware form, since neither can run anymore while `currentPaper` is set (an intermediate version of `clarifyOutcome` briefly preferred `currentPaper` for its guess; that's now moot and was removed along with its tests).
+
 ## Review Triage Log
 
 ### 2026-09-02 — Review pass
@@ -249,3 +263,15 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 **Verification performed:** `npx nx test api` (193/193 passing), `npx nx test web`/`npx nx test retrieval` (cached green, unaffected), `npx nx lint api`/`npx nx lint retrieval` (0 errors), `npx nx build api` (succeeds).
 
 **Residual risk:** Not yet re-verified live in the browser against the actual running app after this change (pending).
+
+## Auto Run Result — Round 4 (Second follow-up, 2026-09-03: force confident tier for a pinned paper)
+
+**Summary:** Live testing of Round 3 showed the pinning fix wasn't sufficient on its own -- meta/summary-style questions ("TLDR", "summarize this paper") kept landing in `clarify`/`refuse` (no LLM call at all) regardless of pinning, since the tier decision is a pure content-similarity score check unrelated to *what kind* of question was asked. Fixed by forcing the confident tier whenever `currentPaper` is set, so the LLM always gets a real chance at a grounded answer; citation verification remains the actual safety net, unchanged.
+
+**Files changed:**
+- `apps/api/src/app/ask/ask.service.ts` -- `ask()` now computes `retrievalTier` (the raw decision, logged for observability) separately from the effective `tier` (forced to `'confident'` when `currentPaper` is present); `logRequest` gained a `retrievalTier` param and logs a new `tierOverriddenByCurrentPaper` boolean. `clarifyOutcome` reverted to its original `currentPaper`-unaware form (it can no longer run at all while `currentPaper` is set, making the intermediate Round-3-and-a-half version of it dead code).
+- `apps/api/src/app/ask/ask.service.spec.ts` -- removed the now-obsolete tests asserting the tier *stayed* `clarify` with `currentPaper` present; added a new "forces the confident tier" suite covering: LLM called despite a clarify- or refuse-level raw score, the forced call still fails safe to refuse on a bad citation, and both `tierOverriddenByCurrentPaper` log states.
+
+**Verification performed:** `npx nx test api` (197/197 passing, 17 suites), `npx nx lint api` (0 errors), `npx nx build api` (succeeds).
+
+**Residual risk:** Not yet re-verified live in the browser against the actual running app after this change (pending) -- Gemini's `gemini-3.6-flash` was observed 503-ing under load during this session's manual testing, independent of anything in this codebase, which may make a live confident-tier check flaky to reproduce on demand.

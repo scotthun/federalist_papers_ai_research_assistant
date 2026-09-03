@@ -68,24 +68,16 @@ function refuseOutcome(error?: string): AnswerOutcome {
 
 /**
  * The clarify tier's templated, code-generated response (`decisions.md`, "Confidence tiering"):
- * names a retrieved chunk's paper as an unproven best guess. `quotedPassage`/`relevanceExplanation`
- * are deliberately omitted from the citation -- it's a guess, not a verified source (this story's
- * Boundaries).
+ * names the top retrieved chunk's paper as an unproven best guess. `quotedPassage`/
+ * `relevanceExplanation` are deliberately omitted from the citation -- it's a guess, not a
+ * verified source (this story's Boundaries).
  *
- * Prefers a chunk from `currentPaper` when one is present in `chunks` (2026-09-03 follow-up to
- * Story 5.2's pinning fix) -- otherwise this tier's guess is the *raw archive-wide top score's*
- * paper, which for a vague low-signal question can easily be some unrelated paper that happened
- * to score marginally higher than the paper the user is visibly looking at, even when that
- * paper's own chunks (pinned or already-present) are sitting right there in the evidence. Falls
- * back to `chunks[0]` (the true top-scored chunk) when `currentPaper` is absent, or its paper
- * isn't among `chunks` at all (pinning is itself best-effort, so this can't assume it always is).
+ * This tier never runs at all when `currentPaper` is set (2026-09-03 second follow-up: `ask()`
+ * forces the confident tier whenever a specific paper is pinned, letting the LLM itself attempt
+ * a grounded answer rather than a templated guess) -- so `topChunk` here is always the true
+ * archive-wide top score's chunk, never a current-paper preference.
  */
-function clarifyOutcome(chunks: RetrievedChunk[], currentPaper?: CurrentPaper): AnswerOutcome {
-  const topChunk =
-    (currentPaper &&
-      chunks.find((chunk) => chunk.paperNumber === currentPaper.paperNumber)) ||
-    chunks[0];
-
+function clarifyOutcome(topChunk: RetrievedChunk): AnswerOutcome {
   return {
     answer:
       `I think you might be asking about Federalist No. ${topChunk.paperNumber} ` +
@@ -199,7 +191,14 @@ export class AskService {
       });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      this.logRequest({ question, tier: undefined, chunks: [], start, error: errorMessage });
+      this.logRequest({
+        question,
+        tier: undefined,
+        retrievalTier: undefined,
+        chunks: [],
+        start,
+        error: errorMessage,
+      });
       throw err;
     }
 
@@ -208,7 +207,20 @@ export class AskService {
     // change) the confidence tier. A paper that didn't rank in the unrestricted top-K by
     // definition can't have scored higher than this.
     const topScore = chunks[0]?.score;
-    const tier = decideAnswerTier(topScore);
+    const retrievalTier = decideAnswerTier(topScore);
+
+    // 2026-09-03 second follow-up: pinning alone (above) only fixes *which evidence* the LLM
+    // sees -- it does nothing about *whether* the LLM gets called at all, and a meta/summary-
+    // style question ("give me a TLDR") structurally can't score well against retrievalTier's
+    // archive-wide content-similarity gate no matter which paper is pinned, since the question
+    // text doesn't resemble any passage's *content*. When the chip names a specific paper, that
+    // is itself a deterministic, code-decided signal that real evidence exists -- stronger than
+    // a raw similarity score for exactly this class of question -- so it overrides the gate to
+    // let the LLM attempt a real, grounded answer. This does not weaken the "never trust the
+    // LLM's self-reported confidence" principle behind that gate (decisions.md, "Confidence
+    // tiering"): citation verification below still fails safe to refuse if the answer isn't
+    // actually grounded, exactly as it already does for every other confident-tier attempt.
+    const tier = currentPaper ? 'confident' : retrievalTier;
 
     // Pin the current paper's own full content as extra evidence when it didn't already make
     // the unrestricted top-K on its own merits (2026-09-03 follow-up to the product correction
@@ -242,6 +254,7 @@ export class AskService {
     this.logRequest({
       question,
       tier,
+      retrievalTier,
       chunks,
       start,
       error: outcome.error,
@@ -264,16 +277,15 @@ export class AskService {
   ): Promise<AnswerOutcome> {
     switch (tier) {
       case 'confident':
-        // currentPaper is prompt context for the LLM only -- refuse below never calls the LLM
-        // at all (its message is paper-agnostic by design), so there's nothing for it to thread
-        // into; clarify below never calls the LLM either, but does use currentPaper to prefer
-        // its templated guess.
+        // currentPaper is prompt context for the LLM only -- clarify/refuse below never run at
+        // all when it's set (ask() forces this tier to 'confident' in that case), so there's
+        // nothing for either of them to thread it into.
         return this.answerConfidently(question, chunks, currentPaper);
       case 'clarify':
         // decideAnswerTier only returns 'clarify' when chunks[0] exists (a defined topScore
-        // requires at least one chunk) -- clarifyOutcome's own fallback-to-chunks[0] documents
-        // that invariant rather than re-deriving it here too.
-        return clarifyOutcome(chunks, currentPaper);
+        // requires at least one chunk) -- the non-null assertion documents that invariant rather
+        // than re-deriving it. Only reachable when currentPaper is absent (see above).
+        return clarifyOutcome(chunks[0]);
       case 'refuse':
         return refuseOutcome();
     }
@@ -397,6 +409,12 @@ export class AskService {
   private logRequest(params: {
     question: string;
     tier: AnswerTier | undefined;
+    /** The tier `decideAnswerTier` actually computed from the raw archive-wide top score --
+     *  logged alongside `tier` (the effective tier resolveOutcome ran with) so an operator can
+     *  tell a currentPaper override apart from a genuine confident-tier match (2026-09-03 second
+     *  follow-up). `undefined` whenever `tier` itself is (the retrieval-failure path never gets
+     *  this far). */
+    retrievalTier: AnswerTier | undefined;
     chunks: RetrievedChunk[];
     start: number;
     error?: string;
@@ -406,7 +424,7 @@ export class AskService {
      *  in the request log. */
     retried?: boolean;
   }): void {
-    const { question, tier, chunks, start, error, retried } = params;
+    const { question, tier, retrievalTier, chunks, start, error, retried } = params;
     // Explicit `!== undefined` check, not a truthy check -- an `Error` with an empty-string
     // `.message` (e.g. `new Error('')`) is still a genuine error and must log at 'error' level,
     // not silently fall through to 'log' just because the message happens to be falsy. Mirrors
@@ -418,6 +436,7 @@ export class AskService {
         event: 'ask',
         question,
         tier,
+        tierOverriddenByCurrentPaper: tier !== undefined && tier !== retrievalTier,
         retrievedPaperNumbers: chunks.map((chunk) => chunk.paperNumber),
         similarityScores: chunks.map((chunk) => Number(chunk.score.toFixed(4))),
         provider: resolveProviderName(),

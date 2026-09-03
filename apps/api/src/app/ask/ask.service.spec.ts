@@ -389,69 +389,10 @@ describe('AskService', () => {
       expect(result.insufficientEvidence).toBe(true);
     });
 
-    // 2026-09-03 follow-up: a vague question ("give me a TLDR") while the quill panel's context
-    // chip is showing often lands here (low signal, no single archive-wide match), and this is
-    // exactly the case where the templated guess must not ignore that the user is visibly
-    // looking at a specific paper -- naming some unrelated higher-scored paper instead would be
-    // the same "AI can't tell what page I'm on" complaint this whole follow-up exists to fix.
-    it("prefers the current paper's own chunk for its guess over the raw archive-wide top score, when the current paper is present in the retrieved chunks", async () => {
-      const aiProvider = fakeAiProvider();
-      const midpoint = (CONFIDENT_THRESHOLD + CLARIFY_THRESHOLD) / 2;
-      const { service } = buildService(
-        [
-          fakeRow({
-            chunkId: 'higher-scored-unrelated-chunk',
-            paperNumber: 39,
-            paperTitle: 'The Conformity of the Plan to Republican Principles',
-            score: midpoint,
-          }),
-          fakeRow({
-            chunkId: 'current-paper-chunk',
-            paperNumber: 37,
-            paperTitle: 'Concerning the Difficulties of the Convention',
-            score: midpoint - 0.05,
-          }),
-        ],
-        aiProvider,
-      );
-
-      const result = await service.ask('Can you give me a TLDR of this paper?', {
-        paperNumber: 37,
-        title: 'Concerning the Difficulties of the Convention',
-      });
-
-      expect(aiProvider.generateStructuredOutput).not.toHaveBeenCalled();
-      expect(result.answer).toContain('37');
-      expect(result.answer).not.toContain('39');
-      expect(result.citations).toEqual([
-        {
-          paperNumber: 37,
-          paperTitle: 'Concerning the Difficulties of the Convention',
-          chunkId: 'current-paper-chunk',
-        },
-      ]);
-    });
-
-    it("falls back to the raw top score's paper when the current paper isn't among the retrieved chunks at all", async () => {
-      const aiProvider = fakeAiProvider();
-      const midpoint = (CONFIDENT_THRESHOLD + CLARIFY_THRESHOLD) / 2;
-      const query = jest
-        .fn()
-        .mockResolvedValueOnce([
-          fakeRow({ chunkId: 'chunk-39', paperNumber: 39, score: midpoint }),
-        ])
-        .mockRejectedValueOnce(new Error('pinning lookup failed'));
-      const dataSource = { query } as unknown as DataSource;
-      const service = new AskService(dataSource, aiProvider);
-
-      const result = await service.ask('Can you give me a TLDR of this paper?', {
-        paperNumber: 37,
-        title: 'Concerning the Difficulties of the Convention',
-      });
-
-      expect(result.answer).toContain('39');
-      expect(result.citations[0].paperNumber).toBe(39);
-    });
+    // 2026-09-03 second follow-up: this tier never runs at all once a current paper is present
+    // -- ask() forces the confident tier instead, so the LLM gets a real chance at a grounded
+    // answer rather than a templated guess. See the "forces the confident tier" describe block
+    // below for that behavior; clarify tier itself is unchanged for the no-currentPaper case.
   });
 
   describe('refuse tier', () => {
@@ -631,35 +572,11 @@ describe('AskService', () => {
       ]);
     });
 
-    it("never promotes the tier using the pinned chunk's placeholder score -- the unrestricted search's own top score still decides confident/clarify/refuse", async () => {
-      const aiProvider = fakeAiProvider();
-      const query = jest
-        .fn()
-        .mockResolvedValueOnce([
-          fakeRow({ chunkId: 'clarify-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD }),
-        ])
-        .mockResolvedValueOnce([
-          {
-            chunkId: 'pinned-chunk-1',
-            paperNumber: 10,
-            paperTitle: 'The Same Subject Continued',
-            content: 'Pinned paper content.',
-          },
-        ]);
-      const dataSource = { query } as unknown as DataSource;
-      const service = new AskService(dataSource, aiProvider);
-
-      const result = await service.ask('Can you give me a TLDR?', {
-        paperNumber: 10,
-        title: 'The Same Subject Continued',
-      });
-
-      // Clarify tier makes no LLM call at all -- if the pinned chunk's score of 1 had leaked
-      // into the tier decision, this would have wrongly become 'confident' and called the LLM.
-      expect(aiProvider.generateStructuredOutput).not.toHaveBeenCalled();
-      expect(result.confidence).toBe('low');
-      expect(result.insufficientEvidence).toBe(true);
-    });
+    // 2026-09-03 second follow-up: superseded the original version of this test (which asserted
+    // the tier stayed 'clarify' and no LLM call happened). That's no longer this fix's goal --
+    // see the "forces the confident tier" describe block below, which now covers exactly this
+    // scenario (a low, sub-CLARIFY_THRESHOLD raw score, currentPaper present) and asserts the
+    // LLM *is* called, grounded in the pinned chunk.
 
     it('does not attempt a second lookup when the current paper already appears in the unrestricted results', async () => {
       const aiProvider = fakeAiProvider();
@@ -702,6 +619,138 @@ describe('AskService', () => {
       expect(result.citations).toEqual([
         { paperNumber: 51, paperTitle: 'The Structure of the Government', chunkId: 'chunk-1' },
       ]);
+    });
+  });
+
+  // 2026-09-03 second follow-up: pinning alone (above) only fixes which evidence the LLM sees,
+  // not whether it gets called at all -- a meta/summary-style question ("give me a TLDR")
+  // structurally can't score well against decideAnswerTier's archive-wide content-similarity
+  // gate no matter which paper is pinned. When the chip names a specific paper, that's itself a
+  // stronger, deterministic signal than the raw score, so it overrides the gate entirely.
+  describe('forces the confident tier when currentPaper is present (2026-09-03)', () => {
+    it('calls the LLM (grounded in the pinned chunk) even though the raw archive-wide score alone would only reach the clarify tier', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A real answer grounded in the pinned paper.',
+        citations: [
+          { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+        ],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'clarify-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD }),
+        ])
+        .mockResolvedValueOnce([
+          {
+            chunkId: 'pinned-chunk-1',
+            paperNumber: 10,
+            paperTitle: 'The Same Subject Continued',
+            content: 'Pinned paper content.',
+          },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider);
+
+      const result = await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(1);
+      expect(result.confidence).toBe('high');
+      expect(result.citations).toEqual([
+        { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+      ]);
+    });
+
+    it('calls the LLM even when the raw archive-wide score would only reach the refuse tier', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A real answer grounded in the pinned paper.',
+        citations: [
+          { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+        ],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'refuse-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+        ])
+        .mockResolvedValueOnce([
+          {
+            chunkId: 'pinned-chunk-1',
+            paperNumber: 10,
+            paperTitle: 'The Same Subject Continued',
+            content: 'Pinned paper content.',
+          },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider);
+
+      const result = await service.ask('Yes', { paperNumber: 10, title: 'The Same Subject Continued' });
+
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(1);
+      expect(result.confidence).toBe('high');
+    });
+
+    it('still fails safe to refuse if the forced LLM call cannot produce a verified citation -- the override never bypasses citation verification', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A fabricated answer.',
+        citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Yes', { paperNumber: 10, title: 'The Same Subject Continued' });
+
+      expect(result.confidence).toBe('low');
+      expect(result.insufficientEvidence).toBe(true);
+      expect(result.citations).toEqual([]);
+    });
+
+    it('logs tierOverriddenByCurrentPaper: true only when the override actually changed the tier', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer.',
+        citations: [{ paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 10, score: CLARIFY_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      const parsed = JSON.parse(logSpy.mock.calls[0][0]);
+      expect(parsed.tier).toBe('confident');
+      expect(parsed.tierOverriddenByCurrentPaper).toBe(true);
+    });
+
+    it('logs tierOverriddenByCurrentPaper: false when the raw score already reached confident on its own', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer.',
+        citations: [{ paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 10, score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      const parsed = JSON.parse(logSpy.mock.calls[0][0]);
+      expect(parsed.tierOverriddenByCurrentPaper).toBe(false);
     });
   });
 
