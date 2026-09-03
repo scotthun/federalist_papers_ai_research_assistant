@@ -1,9 +1,9 @@
 import { Logger } from '@nestjs/common';
-import type { AIProvider } from '@federalist-research/ai';
+import { ProviderUnavailableError, type AIProvider } from '@federalist-research/ai';
 import { LlmAnswerOutputSchema } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
 import { CLARIFY_THRESHOLD, CONFIDENT_THRESHOLD } from './answer-thresholds';
-import { AskService, REFUSE_MESSAGE } from './ask.service';
+import { AskService, PROVIDER_UNAVAILABLE_MESSAGE, REFUSE_MESSAGE } from './ask.service';
 
 /**
  * Fakes both boundaries AskService composes through the real `retrieveRelevantChunks` (its own
@@ -199,6 +199,65 @@ describe('AskService', () => {
         insufficientEvidence: true,
       });
       expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+    });
+
+    // 2026-09-03 third follow-up: REFUSE_MESSAGE ("I couldn't find sufficient evidence...")
+    // wrongly implies a content/evidence problem when the real cause is that the AI provider
+    // itself was never reached (e.g. a 503 "high demand" response) -- confusing given the
+    // question and evidence were both fine. PROVIDER_UNAVAILABLE_MESSAGE says so honestly.
+    it('shows PROVIDER_UNAVAILABLE_MESSAGE (not REFUSE_MESSAGE) when both attempts fail because the AI provider itself is unavailable', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError('503 Service Unavailable: high demand'),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+      expect(result.answer).not.toBe(REFUSE_MESSAGE);
+      expect(result.confidence).toBe('low');
+      expect(result.insufficientEvidence).toBe(true);
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+    });
+
+    it('shows PROVIDER_UNAVAILABLE_MESSAGE when only the first attempt is a provider failure but the retry still fails a different way', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable'))
+        .mockRejectedValueOnce(new Error('Gemini returned no text response'));
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+    });
+
+    it('still shows REFUSE_MESSAGE (not the provider-unavailable wording) when the retry succeeds in getting a response that just fails citation verification', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable'))
+        .mockResolvedValueOnce({
+          answer: 'A response with a fabricated citation.',
+          citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
+        });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      // The retry *did* get a response from the provider -- it was just ungrounded, a
+      // data-quality refuse rather than a provider-outage one, even though the first attempt
+      // was a genuine provider failure.
+      expect(result.answer).toBe(REFUSE_MESSAGE);
     });
 
     it('fails safe (never crashes) when the first attempt returns zero citations, retrying with the zero-citations correction (not the fabricated-chunkId message)', async () => {

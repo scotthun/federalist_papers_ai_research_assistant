@@ -1,6 +1,6 @@
 import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import type { ZodType } from 'zod';
-import type { AIProvider } from '../ai-provider.interface';
+import { ProviderUnavailableError, type AIProvider } from '../ai-provider.interface';
 
 // Verified live against the Gemini API (Story 0.1 spike, 2026-08-24): gemini-embedding-001
 // returns 3072-dimensional embeddings by default. libs/database's `document_chunks.embedding`
@@ -80,10 +80,20 @@ export class GeminiProvider implements AIProvider {
     schema: ZodType<T>;
   }): Promise<T> {
     const structuredModel = this.chatModel.withStructuredOutput(params.schema);
-    const raw = await structuredModel.invoke([
-      ['system', params.systemInstruction],
-      ['human', params.prompt],
-    ]);
+    let raw: unknown;
+    try {
+      raw = await structuredModel.invoke([
+        ['system', params.systemInstruction],
+        ['human', params.prompt],
+      ]);
+    } catch (err) {
+      // The call itself failed (network error, rate limit, 5xx/"high demand") -- the provider
+      // never actually produced a response for us to reject, which is a materially different
+      // failure than the schema-validation throw below (a response we didn't like). Wrapped in
+      // ProviderUnavailableError so callers can tell them apart and message users honestly.
+      const message = err instanceof Error ? err.message : String(err);
+      throw new ProviderUnavailableError(message, err);
+    }
 
     // Zod's own SafeParseReturnType (a discriminated union on `success`), narrowed on its own
     // native type -- deliberately not routed through a bespoke wrapper type of this module's own,

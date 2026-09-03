@@ -188,6 +188,18 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
   - `low` `patch` The chip's 📄 emoji wasn't wrapped in `aria-hidden="true"`, inconsistent with the launcher's own 🪶 emoji in `quill-launcher.tsx` (Story 5.1). Fixed to match.
   - `low` `patch` (doc-only) The spec's/code comment's claim that "a new tab never inherits sessionStorage" overstated the guarantee -- most browsers do copy `sessionStorage` on an explicit tab duplication or crashed-session restore. Softened the wording in this spec's Boundaries and will flag the matching code comment for the same wording fix.
 
+### 2026-09-03 — Third follow-up: honest messaging when the AI provider itself is unavailable (not Story-5.2-scoped, but discovered live in this session)
+
+**Triggering finding:** Manual testing kept hitting Gemini's `gemini-3.6-flash` returning `503 Service Unavailable: high demand` on both the confident tier's first attempt and its one retry. The user-visible result was `REFUSE_MESSAGE` ("I couldn't find sufficient evidence in the Federalist Papers to answer that confidently") -- which reads as a content/evidence judgment, but the real cause was that the model was never actually reached. This predates and is unrelated to Story 5.2's own scope (persistence/page-awareness) -- it's a Story 3.1-era confident-tier messaging gap surfaced by this session's live testing, not a regression this story caused.
+
+**What was amended:** `libs/ai` gained `ProviderUnavailableError` (`ai-provider.interface.ts`), thrown by `GeminiProvider.generateStructuredOutput` specifically when the underlying `invoke()` call itself fails (network/rate-limit/5xx) -- never for a response the provider did return that failed schema validation. `AskService`'s `tryGenerate`/`answerConfidently`/`retryOrFailSafe` thread a `providerUnavailable` signal through so `refuseOutcome` can choose between `REFUSE_MESSAGE` and the new `PROVIDER_UNAVAILABLE_MESSAGE` ("The AI model is temporarily unavailable... please try asking again in a moment") based on the *actual* cause, only when neither attempt ever got a usable response from the provider. No frontend change was needed -- the message is just the same `answer` string the quill panel already renders.
+
+**Known-bad state avoided:** A user asking a perfectly reasonable, well-evidenced question during a provider outage being told (in effect) "your question isn't supported by the source material," which is both wrong and actively confusing about what to do next (a content problem sounds like "rephrase your question"; an outage means "try again shortly").
+
+**KEEP -- preserved unchanged, re-derive around these:**
+- Citation verification and the one-retry-then-fail-safe policy -- this only changes which message text a fail-safe outcome shows, never whether/how verification runs.
+- `REFUSE_MESSAGE` itself, and its use for a genuine "the retry got a response but it wasn't grounded" case -- `PROVIDER_UNAVAILABLE_MESSAGE` is used only when neither attempt ever produced a usable response at all.
+
 ## Design Notes
 
 **Why a Context instead of prop-drilling or a new fetch:** `QuillWidget` is mounted once at the root layout, as a sibling of `{children}` — it has no props and no relationship to whatever page is currently rendered inside `{children}`. `PaperReaderPage` is an async Server Component that already knows the paper's number/title from its own server-side fetch. Rather than inventing a client-fetchable `/api/papers/[paperNumber]` route so the widget could re-fetch that same data (a real network round trip for data the page already has, and a route Story 5.1 deliberately chose not to build), a small React Context lets the page *tell* the widget what it already knows. `AnnouncePaperContext` is a separate file specifically because `page.tsx`'s default export is an async Server Component — a file can't mix a `'use client'` directive with that.
@@ -275,3 +287,18 @@ baseline_revision: '7789f08fc4592bc4ac7e40281ae1222820f5c145'
 **Verification performed:** `npx nx test api` (197/197 passing, 17 suites), `npx nx lint api` (0 errors), `npx nx build api` (succeeds).
 
 **Residual risk:** Not yet re-verified live in the browser against the actual running app after this change (pending) -- Gemini's `gemini-3.6-flash` was observed 503-ing under load during this session's manual testing, independent of anything in this codebase, which may make a live confident-tier check flaky to reproduce on demand.
+
+## Auto Run Result — Round 5 (Third follow-up, 2026-09-03: honest provider-unavailable messaging)
+
+**Summary:** Repeated live testing hit Gemini's `gemini-3.6-flash` returning `503 Service Unavailable` on both the confident-tier's attempts, which surfaced as the standard "insufficient evidence" refuse message -- misleadingly implying a content problem rather than a provider outage. Added `ProviderUnavailableError` (`libs/ai`) so `GeminiProvider` can signal "the call itself never got a response" distinctly from "the response we got wasn't usable," and threaded that signal through `AskService` so the fail-safe-to-refuse outcome picks an honest message accordingly. Not Story-5.2-scoped (this is a Story 3.1-era confident-tier messaging gap), but discovered and fixed live in this session.
+
+**Files changed:**
+- `libs/ai/src/lib/ai-provider.interface.ts` -- new exported `ProviderUnavailableError`.
+- `libs/ai/src/lib/providers/gemini.provider.ts` -- wraps `structuredModel.invoke()`'s own failures in it; the separate schema-validation throw is unchanged (a plain `Error`).
+- `libs/ai/src/lib/providers/gemini.provider.spec.ts` -- updated the "propagates a rejection as-is" test to assert the new wrapping instead.
+- `apps/api/src/app/ask/ask.service.ts` -- new `PROVIDER_UNAVAILABLE_MESSAGE`; `GenerateAttempt`/`refuseOutcome`/`tryGenerate`/`answerConfidently`/`retryOrFailSafe` thread a `providerUnavailable` signal so the final refuse message reflects the real cause (only when neither the first attempt nor the retry ever got a usable response at all -- a retry that succeeds but fails citation verification still shows `REFUSE_MESSAGE`).
+- `apps/api/src/app/ask/ask.service.spec.ts` -- new tests: provider-unavailable wording on both-attempts-failed, on a mixed first-provider-failure/second-different-failure case, and confirmation that a citation-verification-only failure still shows the original wording.
+
+**Verification performed:** `npx nx test ai` (15/15 passing), `npx nx test api` (200/200 passing, 17 suites), `npx nx lint ai`/`npx nx lint api` (0 errors), `npx nx build api` (succeeds, transitively type-checks `libs/ai`).
+
+**Residual risk:** No frontend change was needed (the message flows through the existing `answer` text field), so nothing to re-verify there. Live re-verification against a real Gemini 503 is inherently opportunistic (can't be forced on demand) -- the mechanism is unit-tested directly instead.

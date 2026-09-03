@@ -1,6 +1,28 @@
 import type { ZodType } from 'zod';
 
 /**
+ * Thrown by `generateStructuredOutput`/`generateEmbedding` implementations specifically when the
+ * underlying call failed because the provider itself couldn't be reached or is overloaded (rate
+ * limits, 5xx/"high demand" responses, network failures) -- never for a response the provider
+ * did return that just failed schema validation or didn't satisfy the caller's own checks (e.g.
+ * citation verification). That distinction matters to callers: a provider outage is not evidence
+ * that the question lacks support in the corpus, and user-facing messaging should say so honestly
+ * rather than implying a content/evidence problem (`GeminiProvider`'s own `catch` around
+ * `structuredModel.invoke()` is the canonical example of where to throw this).
+ */
+export class ProviderUnavailableError extends Error {
+  /** The original error thrown by the underlying provider SDK call, preserved for logging --
+   *  not passed via `Error`'s own `cause` option since this lib's TS target doesn't support it. */
+  readonly cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = 'ProviderUnavailableError';
+    this.cause = cause;
+  }
+}
+
+/**
  * Adapter target interface every AI vendor SDK is adapted to (Adapter pattern -- stack.md's "AI
  * provider abstraction", decisions.md). No call site outside `libs/ai` ever imports a vendor SDK
  * directly; everything else depends only on this interface plus `createAIProvider()`

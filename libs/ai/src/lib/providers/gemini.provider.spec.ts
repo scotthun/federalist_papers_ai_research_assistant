@@ -14,6 +14,7 @@ jest.mock('@langchain/google-genai', () => ({
 // Imported after the mock so the class under test picks up the mocked SDK.
 import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 import { z } from 'zod';
+import { ProviderUnavailableError } from '../ai-provider.interface';
 import { GeminiProvider } from './gemini.provider';
 
 describe('GeminiProvider', () => {
@@ -148,21 +149,26 @@ describe('GeminiProvider', () => {
 
     // Distinct from the schema-validation-failure case above, which covers the Runnable
     // *resolving* with an unusable value -- this covers the underlying call itself *rejecting*
-    // (e.g. a network error, or LangChain's own parser finding no usable tool call), proving that
-    // rejection propagates through generateStructuredOutput as-is rather than being swallowed or
-    // re-wrapped into a different error.
-    it('propagates a rejection from the underlying invoke call as-is', async () => {
+    // (e.g. a network error, or LangChain's own parser finding no usable tool call). Wrapped in
+    // ProviderUnavailableError (not re-thrown as-is) so callers can distinguish "the provider was
+    // never reached" from "the provider responded with something unusable" (2026-09-03,
+    // ask.service.ts's honest "model unavailable" vs "insufficient evidence" messaging).
+    it('wraps a rejection from the underlying invoke call in ProviderUnavailableError, preserving the message and original error as cause', async () => {
       const networkError = new Error('network error: ECONNRESET');
       invoke.mockRejectedValue(networkError);
       const provider = new GeminiProvider({ apiKey: 'test-key' });
 
-      await expect(
-        provider.generateStructuredOutput({
-          systemInstruction: 'sys',
-          prompt: 'prompt',
-          schema: outputSchema,
-        }),
-      ).rejects.toBe(networkError);
+      const promise = provider.generateStructuredOutput({
+        systemInstruction: 'sys',
+        prompt: 'prompt',
+        schema: outputSchema,
+      });
+
+      await expect(promise).rejects.toBeInstanceOf(ProviderUnavailableError);
+      await expect(promise).rejects.toThrow('network error: ECONNRESET');
+      await promise.catch((err) => {
+        expect(err.cause).toBe(networkError);
+      });
     });
 
     it('never retries internally -- exactly one invoke call per invocation', async () => {

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { AIProvider } from '@federalist-research/ai';
+import { ProviderUnavailableError, type AIProvider } from '@federalist-research/ai';
 import {
   DEFAULT_TOP_K,
   getAllChunksForPaper,
@@ -35,6 +35,15 @@ const TOP_K = DEFAULT_TOP_K;
 export const REFUSE_MESSAGE =
   "I couldn't find sufficient evidence in the Federalist Papers to answer that confidently.";
 
+/** Used instead of `REFUSE_MESSAGE` when the fail-safe-to-refuse outcome was caused by the AI
+ *  provider itself being unreachable/overloaded (a `ProviderUnavailableError`, e.g. a 503 "high
+ *  demand" response) on both the first attempt and the one retry -- never for a citation-
+ *  verification failure or malformed response the provider *did* return. `REFUSE_MESSAGE`'s
+ *  wording ("I couldn't find sufficient evidence") is misleading for this cause: it implies a
+ *  content/evidence problem when the real cause is that the model was never actually reached. */
+export const PROVIDER_UNAVAILABLE_MESSAGE =
+  "The AI model is temporarily unavailable (it's experiencing high demand right now) -- please try asking again in a moment.";
+
 /** The one shape ever produced by `AskService.ask` before `confidence`/`insufficientEvidence` are
  *  folded into the final `Answer` response -- kept separate from `Answer` itself only so `error`
  *  (logging-only, never returned to the client) has somewhere to live without polluting the
@@ -56,9 +65,9 @@ interface AnswerOutcome {
   retried?: boolean;
 }
 
-function refuseOutcome(error?: string): AnswerOutcome {
+function refuseOutcome(error?: string, providerUnavailable = false): AnswerOutcome {
   return {
-    answer: REFUSE_MESSAGE,
+    answer: providerUnavailable ? PROVIDER_UNAVAILABLE_MESSAGE : REFUSE_MESSAGE,
     citations: [],
     confidence: 'low',
     insufficientEvidence: true,
@@ -137,6 +146,10 @@ interface GenerateAttempt {
   answer: string;
   citations: Citation[];
   errorMessage?: string;
+  /** `true` only when `errorMessage` came from a `ProviderUnavailableError` -- the call itself
+   *  never reached a response (network/rate-limit/5xx), as opposed to a response the provider
+   *  did return that failed schema validation. Meaningless when `errorMessage` is `undefined`. */
+  providerUnavailable?: boolean;
 }
 
 /**
@@ -345,6 +358,7 @@ export class AskService {
       buildInvalidOutputCorrection(first.errorMessage),
       `first attempt produced invalid output: ${first.errorMessage}`,
       currentPaper,
+      first.providerUnavailable,
     );
   }
 
@@ -355,6 +369,11 @@ export class AskService {
     correction: string,
     firstFailureReason: string,
     currentPaper?: CurrentPaper,
+    /** Whether the *first* attempt's own failure (if it had one) was a `ProviderUnavailableError`
+     *  -- `undefined`/`false` when the first attempt actually produced a response (e.g. this was
+     *  called for a citation-verification failure instead). Combined with the retry's own outcome
+     *  below to decide the final refuse message's wording. */
+    firstProviderUnavailable?: boolean,
   ): Promise<AnswerOutcome> {
     const retry = await this.tryGenerate(question, chunks, correction, currentPaper);
     if (retry.errorMessage === undefined) {
@@ -371,6 +390,9 @@ export class AskService {
           retried: true,
         };
       }
+      // The retry *did* produce a response here, just one that still failed citation
+      // verification -- a data-quality refuse, not a provider outage, regardless of whether the
+      // first attempt happened to be a ProviderUnavailableError.
       const retryFailureDetail =
         retry.citations.length === 0
           ? 'retry also returned zero citations'
@@ -378,7 +400,15 @@ export class AskService {
       return refuseOutcome(`${firstFailureReason}; ${retryFailureDetail}`);
     }
 
-    return refuseOutcome(`${firstFailureReason}; retry also failed: ${retry.errorMessage}`);
+    // Neither attempt produced a usable response -- if either one's failure was the provider
+    // itself being unreachable/overloaded, say so honestly instead of implying an evidence
+    // problem (`decisions.md`'s "Confidence tiering" citation-verification safety net still
+    // applies either way: this is only about which message text is shown, never about skipping
+    // verification).
+    return refuseOutcome(
+      `${firstFailureReason}; retry also failed: ${retry.errorMessage}`,
+      firstProviderUnavailable === true || retry.providerUnavailable === true,
+    );
   }
 
   private async tryGenerate(
@@ -399,6 +429,7 @@ export class AskService {
         answer: '',
         citations: [],
         errorMessage: err instanceof Error ? err.message : String(err),
+        providerUnavailable: err instanceof ProviderUnavailableError,
       };
     }
   }
