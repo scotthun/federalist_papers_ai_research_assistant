@@ -11,11 +11,16 @@ const EMBEDDING_DIMENSION = 3072;
 
 // gemini-2.5-flash returns 404 for new API keys as of 2026-08 ("no longer available to new
 // users"); the API's own error pointed at this replacement (Story 0.1 spike, confirmed live
-// again for this story).
-const GENERATION_MODEL = 'gemini-3.6-flash';
+// again for this story). Overridable via GeminiProviderOptions.generationModel/
+// GEMINI_GENERATION_MODEL (2026-09-03) -- swapping models to work around a specific model's
+// live availability (observed both `gemini-3.6-flash` and `gemini-3.5-flash` returning 503
+// "high demand" the same day) previously meant editing this source constant.
+const DEFAULT_GENERATION_MODEL = 'gemini-3.6-flash';
 
 export interface GeminiProviderOptions {
   apiKey: string;
+  /** Overrides `DEFAULT_GENERATION_MODEL`. See `GEMINI_GENERATION_MODEL` in `.env.example`. */
+  generationModel?: string;
 }
 
 /** Concrete Adapter wrapping `@langchain/google-genai` behind the `AIProvider` interface -- the
@@ -35,7 +40,7 @@ export class GeminiProvider implements AIProvider {
     // -- one model call per invocation" contract at runtime (the caller's own retry policy, e.g.
     // this story's citation-verification retry, is the only place a retry is allowed to happen).
     this.chatModel = new ChatGoogleGenerativeAI({
-      model: GENERATION_MODEL,
+      model: options.generationModel ?? DEFAULT_GENERATION_MODEL,
       apiKey: options.apiKey,
       maxRetries: 0,
     });

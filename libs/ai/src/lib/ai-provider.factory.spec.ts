@@ -1,5 +1,7 @@
+const chatModelCtor = jest.fn().mockImplementation(() => ({}));
+
 jest.mock('@langchain/google-genai', () => ({
-  ChatGoogleGenerativeAI: jest.fn().mockImplementation(() => ({})),
+  ChatGoogleGenerativeAI: chatModelCtor,
   GoogleGenerativeAIEmbeddings: jest.fn().mockImplementation(() => ({})),
 }));
 
@@ -29,6 +31,28 @@ describe('createAIProvider', () => {
   it('throws a clear error for an unsupported provider', () => {
     expect(() => createAIProvider({ AI_PROVIDER: 'openai' })).toThrow(
       /Unknown AI_PROVIDER/,
+    );
+  });
+
+  // 2026-09-03: lets a specific model's live unavailability be worked around by restarting with
+  // a different env value, without editing source.
+  it('passes GEMINI_GENERATION_MODEL through to the underlying chat model when set', () => {
+    createAIProvider({
+      AI_PROVIDER: 'gemini',
+      GEMINI_API_KEY: 'test-key',
+      GEMINI_GENERATION_MODEL: 'gemini-2.5-flash-lite',
+    });
+
+    expect(chatModelCtor).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gemini-2.5-flash-lite' }),
+    );
+  });
+
+  it("falls back to GeminiProvider's own default model when GEMINI_GENERATION_MODEL is unset", () => {
+    createAIProvider({ AI_PROVIDER: 'gemini', GEMINI_API_KEY: 'test-key' });
+
+    expect(chatModelCtor).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gemini-3.6-flash' }),
     );
   });
 });

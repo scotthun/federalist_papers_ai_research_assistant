@@ -23,7 +23,11 @@ export function createAIProvider(
           'AI_PROVIDER is "gemini" but GEMINI_API_KEY is not set. Set GEMINI_API_KEY in the environment (see .env.example).',
         );
       }
-      return new GeminiProvider({ apiKey });
+      // Optional -- GeminiProvider falls back to its own default when unset (see
+      // GEMINI_GENERATION_MODEL in .env.example). Lets a specific model's live 503s be worked
+      // around by restarting with a different env value, not by editing source.
+      const generationModel = env['GEMINI_GENERATION_MODEL'];
+      return new GeminiProvider({ apiKey, generationModel });
     }
     default:
       throw new Error(
