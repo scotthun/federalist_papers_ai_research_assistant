@@ -64,24 +64,37 @@ export class ProviderUnavailableError extends Error {
 }
 
 /**
- * Adapter target interface every AI vendor SDK is adapted to (Adapter pattern -- stack.md's "AI
+ * Adapter target interfaces every AI vendor SDK is adapted to (Adapter pattern -- stack.md's "AI
  * provider abstraction", decisions.md). No call site outside `libs/ai` ever imports a vendor SDK
- * directly; everything else depends only on this interface plus `createAIProvider()`
- * (ai-provider.factory.ts).
+ * directly; everything else depends only on these interfaces plus `createEmbeddingProvider()`/
+ * `createGenerationProvider()` (ai-provider.factory.ts).
  *
- * `generateEmbedding()` was implemented first (Epic 1, ingestion). `generateStructuredOutput()`
- * (Epic 3, Ask-the-Archive) is the interface's generation half, added in Story 3.1 -- it collapses
- * the `generateAnswer`/`generateStructuredOutput` split this doc comment used to reserve for Epic
- * 3 into this one generic, schema-validated method; a caller that wants a grounded answer passes
- * `LlmAnswerOutputSchema` (`libs/shared`) as `schema`, but nothing about this method is
- * answer-specific.
+ * Originally one combined `AIProvider` interface (`generateEmbedding` + `generateStructuredOutput`
+ * on the same type) -- split in two (spec-openrouter-provider.md's Spec Change Log, 2026-09-05)
+ * once a second provider (`OpenRouterProvider`) needed to implement generation only:
+ * embeddings stay Gemini-only (pgvector's stored dimension is pinned to
+ * `gemini-embedding-001`'s output -- see `gemini.provider.ts`), so an `OpenRouterProvider` that
+ * "implemented" `generateEmbedding` would only ever be a throwing stub, not an honest
+ * implementation of the interface it claims. Splitting means each provider class implements
+ * exactly the interface(s) it can actually back: `GeminiProvider` implements both (it still does
+ * both jobs for the `'gemini'` case); `OpenRouterProvider` implements only `GenerationProvider`.
  */
-export interface AIProvider {
+export interface EmbeddingProvider {
   /** Generates a single embedding vector for `text`. Dimension is provider/model-specific --
    *  callers that persist it (see libs/database's `document_chunks.embedding`) must already know
    *  which dimension they're pinned to. */
   generateEmbedding(text: string): Promise<number[]>;
+}
 
+/**
+ * `generateStructuredOutput()` (Epic 3, Ask-the-Archive) is the generation half of what used to be
+ * one combined `AIProvider` interface, added in Story 3.1 -- it collapses the
+ * `generateAnswer`/`generateStructuredOutput` split this doc comment used to reserve for Epic 3
+ * into this one generic, schema-validated method; a caller that wants a grounded answer passes
+ * `LlmAnswerOutputSchema` (`libs/shared`) as `schema`, but nothing about this method is
+ * answer-specific.
+ */
+export interface GenerationProvider {
   /**
    * Generates a single structured-output response, validated against `schema` before it's ever
    * returned to the caller -- regardless of what schema hinting the underlying provider SDK

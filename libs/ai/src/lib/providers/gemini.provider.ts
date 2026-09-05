@@ -2,7 +2,8 @@ import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain
 import type { ZodType } from 'zod';
 import {
   ProviderUnavailableError,
-  type AIProvider,
+  type EmbeddingProvider,
+  type GenerationProvider,
   type ProviderFailureKind,
 } from '../ai-provider.interface';
 
@@ -112,11 +113,13 @@ export interface GeminiProviderOptions {
   generationModel?: string;
 }
 
-/** Concrete Adapter wrapping `@langchain/google-genai` behind the `AIProvider` interface -- the
- *  one initial provider (stack.md: "implement at least one provider initially"). LangChain.js is
- *  the architecture-mandated AI layer (ARCHITECTURE-SPINE.md); it is an implementation detail of
- *  this one adapter class, never imported by any consumer outside `libs/ai` (GH-24). */
-export class GeminiProvider implements AIProvider {
+/** Concrete Adapter wrapping `@langchain/google-genai` behind the `EmbeddingProvider`/
+ *  `GenerationProvider` interfaces -- the one initial provider (stack.md: "implement at least one
+ *  provider initially"), and the only one implementing both (embeddings stay Gemini-only --
+ *  `ai-provider.interface.ts`'s doc comment). LangChain.js is the architecture-mandated AI layer
+ *  (ARCHITECTURE-SPINE.md); it is an implementation detail of this one adapter class, never
+ *  imported by any consumer outside `libs/ai` (GH-24). */
+export class GeminiProvider implements EmbeddingProvider, GenerationProvider {
   private readonly chatModel: ChatGoogleGenerativeAI;
   private readonly embeddings: GoogleGenerativeAIEmbeddings;
 
