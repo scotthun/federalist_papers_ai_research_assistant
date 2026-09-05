@@ -1,18 +1,18 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken } from '@nestjs/typeorm';
-import type { AIProvider } from '@federalist-research/ai';
+import type { EmbeddingProvider, GenerationProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
-import { AI_PROVIDER } from '../ai-provider.provider';
+import { EMBEDDING_PROVIDER, GENERATION_PROVIDER } from '../ai-provider.provider';
 import { AskController } from './ask.controller';
 import { AskService } from './ask.service';
 import { CLARIFY_THRESHOLD, CONFIDENT_THRESHOLD } from './answer-thresholds';
 
 /**
  * Real-HTTP test for `POST /api/ask`'s wiring: AskController + AskService are the real classes
- * (only their DataSource/AIProvider dependencies are faked), assembled the same way AskModule
- * does, with the same global `api` prefix main.ts applies -- mirrors papers.http.spec.ts's
- * approach (an actual TCP request via `fetch`, not a direct function call).
+ * (only their DataSource/EmbeddingProvider/GenerationProvider dependencies are faked), assembled
+ * the same way AskModule does, with the same global `api` prefix main.ts applies -- mirrors
+ * papers.http.spec.ts's approach (an actual TCP request via `fetch`, not a direct function call).
  */
 describe('POST /api/ask (HTTP wiring)', () => {
   let app: INestApplication;
@@ -37,8 +37,10 @@ describe('POST /api/ask (HTTP wiring)', () => {
     });
     fakeDbQuery = jest.fn().mockResolvedValue([fakeRetrievedChunkRow]);
     const fakeDataSource = { query: fakeDbQuery } as unknown as DataSource;
-    const fakeAiProvider: AIProvider = {
+    const fakeEmbeddingProvider: EmbeddingProvider = {
       generateEmbedding: fakeGenerateEmbedding,
+    };
+    const fakeGenerationProvider: GenerationProvider = {
       generateStructuredOutput: fakeGenerateStructuredOutput,
     };
 
@@ -47,7 +49,8 @@ describe('POST /api/ask (HTTP wiring)', () => {
       providers: [
         AskService,
         { provide: getDataSourceToken(), useValue: fakeDataSource },
-        { provide: AI_PROVIDER, useValue: fakeAiProvider },
+        { provide: EMBEDDING_PROVIDER, useValue: fakeEmbeddingProvider },
+        { provide: GENERATION_PROVIDER, useValue: fakeGenerationProvider },
       ],
     }).compile();
 

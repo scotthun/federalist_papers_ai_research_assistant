@@ -1,5 +1,9 @@
 import { Logger } from '@nestjs/common';
-import { ProviderUnavailableError, type AIProvider } from '@federalist-research/ai';
+import {
+  ProviderUnavailableError,
+  type EmbeddingProvider,
+  type GenerationProvider,
+} from '@federalist-research/ai';
 import { LlmAnswerOutputSchema } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
 import { CLARIFY_THRESHOLD, CONFIDENT_THRESHOLD } from './answer-thresholds';
@@ -8,11 +12,15 @@ import { AskService, PROVIDER_UNAVAILABLE_MESSAGE, REFUSE_MESSAGE } from './ask.
 /**
  * Fakes both boundaries AskService composes through the real `retrieveRelevantChunks` (its own
  * SQL/filter correctness is covered by libs/retrieval's specs, not re-tested here) and the real
- * `AIProvider` interface -- this spec covers only AskService's own orchestration: tier
- * branching, prompt construction, citation verification, the one-retry-then-fail-safe policy,
- * and logging.
+ * `EmbeddingProvider`/`GenerationProvider` interfaces -- this spec covers only AskService's own
+ * orchestration: tier branching, prompt construction, citation verification, the
+ * one-retry-then-fail-safe policy, and logging. One fake object implements both interfaces
+ * (production wires the always-Gemini embedding half and the AI_PROVIDER-driven generation half
+ * as two separate injected providers -- see ai-provider.provider.ts -- but nothing this spec
+ * asserts distinguishes them, so a single fake passed as both constructor args keeps every
+ * existing assertion valid).
  */
-function fakeAiProvider(): AIProvider {
+function fakeAiProvider(): EmbeddingProvider & GenerationProvider {
   return {
     generateEmbedding: jest.fn().mockResolvedValue([0.1, 0.2, 0.3]),
     generateStructuredOutput: jest.fn(),
@@ -43,9 +51,12 @@ function fakeDataSource(rows: FakeRow[]): { dataSource: DataSource; query: jest.
   return { dataSource: { query } as unknown as DataSource, query };
 }
 
-function buildService(rows: FakeRow[], aiProvider: AIProvider = fakeAiProvider()) {
+function buildService(
+  rows: FakeRow[],
+  aiProvider: EmbeddingProvider & GenerationProvider = fakeAiProvider(),
+) {
   const { dataSource, query } = fakeDataSource(rows);
-  const service = new AskService(dataSource, aiProvider);
+  const service = new AskService(dataSource, aiProvider, aiProvider);
   return { service, aiProvider, query };
 }
 
@@ -700,7 +711,7 @@ describe('AskService', () => {
           },
         ]);
       const dataSource = { query } as unknown as DataSource;
-      const service = new AskService(dataSource, aiProvider);
+      const service = new AskService(dataSource, aiProvider, aiProvider);
 
       const result = await service.ask('Can you give me a TLDR?', {
         paperNumber: 10,
@@ -759,7 +770,7 @@ describe('AskService', () => {
         .mockResolvedValueOnce([fakeRow({ chunkId: 'chunk-1', paperNumber: 51, score: CONFIDENT_THRESHOLD })])
         .mockRejectedValueOnce(new Error('pinning lookup failed'));
       const dataSource = { query } as unknown as DataSource;
-      const service = new AskService(dataSource, aiProvider);
+      const service = new AskService(dataSource, aiProvider, aiProvider);
 
       const result = await service.ask('Can you give me a TLDR?', {
         paperNumber: 10,
@@ -801,7 +812,7 @@ describe('AskService', () => {
           },
         ]);
       const dataSource = { query } as unknown as DataSource;
-      const service = new AskService(dataSource, aiProvider);
+      const service = new AskService(dataSource, aiProvider, aiProvider);
 
       const result = await service.ask('Can you give me a TLDR?', {
         paperNumber: 10,
@@ -837,7 +848,7 @@ describe('AskService', () => {
           },
         ]);
       const dataSource = { query } as unknown as DataSource;
-      const service = new AskService(dataSource, aiProvider);
+      const service = new AskService(dataSource, aiProvider, aiProvider);
 
       const result = await service.ask('Yes', { paperNumber: 10, title: 'The Same Subject Continued' });
 

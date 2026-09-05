@@ -1,11 +1,11 @@
-import type { AIProvider } from '@federalist-research/ai';
+import type { EmbeddingProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
 import { PapersService } from './papers.service';
 
-/** None of findAll/search/findOne touch the AIProvider boundary at all -- a fake that's never
- *  expected to be called is enough to satisfy PapersService's constructor for those tests. */
-function unusedAiProvider(): AIProvider {
-  return { generateEmbedding: jest.fn(), generateStructuredOutput: jest.fn() };
+/** None of findAll/search/findOne touch the EmbeddingProvider boundary at all -- a fake that's
+ *  never expected to be called is enough to satisfy PapersService's constructor for those tests. */
+function unusedAiProvider(): EmbeddingProvider {
+  return { generateEmbedding: jest.fn() };
 }
 
 /**
@@ -61,16 +61,15 @@ function createServiceForSearch(rows: unknown[]): PapersService {
  * Fakes both boundaries `retrieveRelevantChunks` composes -- `retrieveRelevantChunks` itself
  * (the raw pgvector SQL, filter-before-limit correctness) is exercised for real, against real
  * Postgres, by libs/retrieval's retrieval.integration.spec.ts. This test covers only that
- * PapersService.searchSemantic wires the DataSource/AIProvider/query/options through to it
+ * PapersService.searchSemantic wires the DataSource/EmbeddingProvider/query/options through to it
  * untouched and returns its result as-is (Story 2.2's "pure pass-through" contract).
  */
 function createServiceForSemantic(options: {
   embedding?: number[];
   rows?: unknown[];
-}): { service: PapersService; aiProvider: AIProvider; query: jest.Mock } {
-  const aiProvider: AIProvider = {
+}): { service: PapersService; aiProvider: EmbeddingProvider; query: jest.Mock } {
+  const aiProvider: EmbeddingProvider = {
     generateEmbedding: jest.fn().mockResolvedValue(options.embedding ?? [0.1, 0.2, 0.3]),
-    generateStructuredOutput: jest.fn(),
   };
   const query = jest.fn().mockResolvedValue(options.rows ?? []);
   const dataSource = { query } as unknown as DataSource;
@@ -221,9 +220,8 @@ describe('PapersService', () => {
     });
 
     it('propagates an embedding-provider failure as a rejected promise, never swallowing it', async () => {
-      const aiProvider: AIProvider = {
+      const aiProvider: EmbeddingProvider = {
         generateEmbedding: jest.fn().mockRejectedValue(new Error('GEMINI_API_KEY is not set')),
-        generateStructuredOutput: jest.fn(),
       };
       const dataSource = { query: jest.fn() } as unknown as DataSource;
       const service = new PapersService(dataSource, aiProvider);

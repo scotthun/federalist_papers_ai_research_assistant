@@ -18,7 +18,7 @@
  * changes enough that the thresholds might need recalibrating.
  */
 import { Logger } from '@nestjs/common';
-import { createAIProvider, type AIProvider } from '@federalist-research/ai';
+import { createEmbeddingProvider, type EmbeddingProvider } from '@federalist-research/ai';
 import { createDataSource } from '@federalist-research/database';
 import {
   DEFAULT_TOP_K,
@@ -184,7 +184,7 @@ export function withEmbedDelay(
 
 async function runRealCalibration(
   dataSource: DataSource,
-  aiProvider: AIProvider,
+  aiProvider: EmbeddingProvider,
 ): Promise<CalibrationSummary> {
   const embedDelayMs = parseNonNegativeNumberEnv(process.env, 'CALIBRATE_EMBED_DELAY_MS', 250);
 
@@ -203,7 +203,7 @@ async function runRealCalibration(
 
 async function main(): Promise<void> {
   const { DATABASE_URL } = validateEnv();
-  const aiProvider = createAIProvider();
+  const aiProvider = createEmbeddingProvider();
   const dataSource = createDataSource(DATABASE_URL);
   await dataSource.initialize();
 

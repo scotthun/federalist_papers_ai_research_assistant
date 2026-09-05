@@ -19,7 +19,7 @@
  * this script also makes one real embedding call per dataset question with no delay otherwise.
  */
 import { Logger } from '@nestjs/common';
-import { createAIProvider, type AIProvider } from '@federalist-research/ai';
+import { createEmbeddingProvider, type EmbeddingProvider } from '@federalist-research/ai';
 import { createDataSource } from '@federalist-research/database';
 import { retrieveRelevantChunks, type RetrievedChunk } from '@federalist-research/retrieval';
 import type { DataSource } from 'typeorm';
@@ -29,7 +29,7 @@ import evalDataset from './retrieval-eval-dataset.json';
 
 // Loaded at module top level, before any env var is read below -- same rationale as ingest.ts's
 // identical call: `.env` values must already be in `process.env` by the time loadConfig/
-// createAIProvider/validateEnv run.
+// createEmbeddingProvider/validateEnv run.
 loadLocalEnv();
 
 const TOP_K = 5;
@@ -172,7 +172,10 @@ export function withEmbedDelay(
   };
 }
 
-async function runRealEval(dataSource: DataSource, aiProvider: AIProvider): Promise<EvalSummary> {
+async function runRealEval(
+  dataSource: DataSource,
+  aiProvider: EmbeddingProvider,
+): Promise<EvalSummary> {
   const embedDelayMs = parseNonNegativeNumberEnv(process.env, 'EVAL_EMBED_DELAY_MS', 250);
 
   return runEval({
@@ -189,10 +192,11 @@ async function runRealEval(dataSource: DataSource, aiProvider: AIProvider): Prom
 
 async function main(): Promise<void> {
   const { DATABASE_URL } = validateEnv();
-  // Constructed before the loop: a missing/invalid AI_PROVIDER config is a systemic problem, not
-  // a per-question one -- fail fast rather than attempting (and failing) every question in the
-  // dataset (same rationale as ingest.ts's identical call).
-  const aiProvider = createAIProvider();
+  // Constructed before the loop: a missing GEMINI_API_KEY (embeddings always use Gemini,
+  // regardless of AI_PROVIDER) is a systemic problem, not a per-question one -- fail fast rather
+  // than attempting (and failing) every question in the dataset (same rationale as ingest.ts's
+  // identical call).
+  const aiProvider = createEmbeddingProvider();
   const dataSource = createDataSource(DATABASE_URL);
   await dataSource.initialize();
 

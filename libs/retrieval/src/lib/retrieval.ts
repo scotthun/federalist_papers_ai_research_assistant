@@ -1,4 +1,4 @@
-import type { AIProvider } from '@federalist-research/ai';
+import type { EmbeddingProvider } from '@federalist-research/ai';
 import { escapeLikeTerm } from '@federalist-research/database';
 import { DataSource } from 'typeorm';
 
@@ -81,7 +81,7 @@ interface RetrievalRow {
  */
 export async function retrieveRelevantChunks(
   dataSource: DataSource,
-  aiProvider: AIProvider,
+  aiProvider: EmbeddingProvider,
   query: string,
   options: RetrieveOptions = {},
 ): Promise<RetrievedChunk[]> {

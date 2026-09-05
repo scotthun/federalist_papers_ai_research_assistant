@@ -1,20 +1,19 @@
-import type { AIProvider } from '@federalist-research/ai';
+import type { EmbeddingProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
 import { getAllChunksForPaper, retrieveRelevantChunks } from './retrieval';
 
 /**
  * Pure-JS unit coverage for `retrieveRelevantChunks`'s composition logic (embedding call,
  * default/short-circuit behavior, SQL/param construction, row-to-RetrievedChunk mapping) --
- * fakes both boundaries (`AIProvider` and `DataSource`), no real Postgres or Gemini call. The
- * real pgvector SQL correctness this function's Boundaries actually hinge on (ordering,
+ * fakes both boundaries (`EmbeddingProvider` and `DataSource`), no real Postgres or Gemini call.
+ * The real pgvector SQL correctness this function's Boundaries actually hinge on (ordering,
  * filter-before-limit against real data) is covered separately by
  * retrieval.integration.spec.ts, which is DATABASE_URL-gated and runs against real Postgres +
  * hand-crafted deterministic embeddings -- never a real Gemini call either.
  */
-function fakeAiProvider(embedding: number[] = [0.1, 0.2, 0.3]): AIProvider {
+function fakeAiProvider(embedding: number[] = [0.1, 0.2, 0.3]): EmbeddingProvider {
   return {
     generateEmbedding: jest.fn().mockResolvedValue(embedding),
-    generateStructuredOutput: jest.fn(),
   };
 }
 

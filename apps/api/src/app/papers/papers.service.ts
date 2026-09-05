@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { AIProvider } from '@federalist-research/ai';
+import type { EmbeddingProvider } from '@federalist-research/ai';
 import {
   findAllPapersForBrowse,
   findPaperDetailByNumber,
@@ -13,7 +13,7 @@ import {
 } from '@federalist-research/retrieval';
 import { PaperDetail, PaperSummary } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
-import { AI_PROVIDER } from '../ai-provider.provider';
+import { EMBEDDING_PROVIDER } from '../ai-provider.provider';
 
 /**
  * Backs `GET /api/papers` (CAP-1, Browse Papers), `GET /api/papers/search` (Story 2.1, "Quick
@@ -29,7 +29,7 @@ import { AI_PROVIDER } from '../ai-provider.provider';
 export class PapersService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
-    @Inject(AI_PROVIDER) private readonly aiProvider: AIProvider,
+    @Inject(EMBEDDING_PROVIDER) private readonly embeddingProvider: EmbeddingProvider,
   ) {}
 
   async findAll(): Promise<PaperSummary[]> {
@@ -73,6 +73,6 @@ export class PapersService {
    * response rather than a hang or an unhandled crash (I/O Edge-Case Matrix).
    */
   searchSemantic(query: string, options: RetrieveOptions): Promise<RetrievedChunk[]> {
-    return retrieveRelevantChunks(this.dataSource, this.aiProvider, query, options);
+    return retrieveRelevantChunks(this.dataSource, this.embeddingProvider, query, options);
   }
 }

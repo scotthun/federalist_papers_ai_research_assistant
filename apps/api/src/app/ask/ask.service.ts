@@ -2,7 +2,8 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import {
   ProviderUnavailableError,
-  type AIProvider,
+  type EmbeddingProvider,
+  type GenerationProvider,
   type ProviderFailureKind,
 } from '@federalist-research/ai';
 import {
@@ -17,7 +18,7 @@ import {
   type Citation,
 } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
-import { AI_PROVIDER } from '../ai-provider.provider';
+import { EMBEDDING_PROVIDER, GENERATION_PROVIDER } from '../ai-provider.provider';
 import {
   ANSWER_SYSTEM_INSTRUCTION,
   buildAnswerPrompt,
@@ -256,7 +257,8 @@ export class AskService {
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
-    @Inject(AI_PROVIDER) private readonly aiProvider: AIProvider,
+    @Inject(EMBEDDING_PROVIDER) private readonly embeddingProvider: EmbeddingProvider,
+    @Inject(GENERATION_PROVIDER) private readonly generationProvider: GenerationProvider,
   ) {}
 
   // `currentPaper` (Story 5.2, product-corrected 2026-09-02) is prompt context only -- retrieval
@@ -277,7 +279,7 @@ export class AskService {
     // error response ... Never a hang").
     let chunks: RetrievedChunk[];
     try {
-      chunks = await retrieveRelevantChunks(this.dataSource, this.aiProvider, question, {
+      chunks = await retrieveRelevantChunks(this.dataSource, this.embeddingProvider, question, {
         topK: TOP_K,
       });
     } catch (err) {
@@ -498,7 +500,7 @@ export class AskService {
     currentPaper?: CurrentPaper,
   ): Promise<GenerateAttempt> {
     try {
-      const output = await this.aiProvider.generateStructuredOutput({
+      const output = await this.generationProvider.generateStructuredOutput({
         systemInstruction: ANSWER_SYSTEM_INSTRUCTION,
         prompt: buildAnswerPrompt(question, chunks, correction, currentPaper),
         schema: LlmAnswerOutputSchema,
