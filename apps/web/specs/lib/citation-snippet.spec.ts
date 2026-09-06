@@ -36,4 +36,20 @@ describe('truncateCitationSnippet', () => {
   it('honors a custom maxLength override', () => {
     expect(truncateCitationSnippet('abcdefghij', 5)).toBe('abcde…');
   });
+
+  // spec-chat-nice-to-haves.md: word-boundary-aware truncation.
+  it('backs up to the last word boundary rather than cutting a word in half', () => {
+    // A naive hard cut at 10 chars would land mid-word ("Hello wond…").
+    const result = truncateCitationSnippet('Hello wonderful world', 10);
+
+    expect(result).toBe('Hello…');
+  });
+
+  it('falls back to a hard cut when there is no space anywhere in the cut region', () => {
+    const passage = 'a'.repeat(20);
+
+    const result = truncateCitationSnippet(passage, 10);
+
+    expect(result).toBe(`${'a'.repeat(10)}…`);
+  });
 });
