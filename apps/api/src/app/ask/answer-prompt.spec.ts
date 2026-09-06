@@ -4,6 +4,8 @@ import {
   buildAnswerPrompt,
   buildInvalidCitationCorrection,
   buildInvalidOutputCorrection,
+  buildRetrievalQuery,
+  type ConversationTurn,
 } from './answer-prompt';
 
 function chunk(overrides: Partial<RetrievedChunk> = {}): RetrievedChunk {
@@ -97,6 +99,95 @@ describe('buildAnswerPrompt', () => {
       expect(prompt).toContain('CORRECTION: fix your citations');
       expect(prompt).toContain('Federalist No. 10');
     });
+  });
+});
+
+// spec-conversation-history-context.md: threads the full prior conversation into the generation
+// prompt as a "CONVERSATION SO FAR" block, clearly separated from EVIDENCE and never a citation
+// source.
+describe('buildAnswerPrompt: CONVERSATION SO FAR block (spec-conversation-history-context.md)', () => {
+  const history: ConversationTurn[] = [
+    { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51 discuss factions.' },
+    { question: 'Which one is most similar to No. 6?', answer: 'No. 8 is most similar to No. 6.' },
+  ];
+
+  it('omits the CONVERSATION SO FAR block entirely when history is empty/absent', () => {
+    const promptWithoutArg = buildAnswerPrompt('question', [chunk()]);
+    const promptWithEmptyArray = buildAnswerPrompt('question', [chunk()], undefined, undefined, []);
+
+    expect(promptWithoutArg).not.toContain('CONVERSATION SO FAR');
+    expect(promptWithEmptyArray).not.toContain('CONVERSATION SO FAR');
+    // Byte-for-byte identical to the no-history-param case -- this story's "existing single-turn
+    // behavior is byte-for-byte unchanged" boundary.
+    expect(promptWithEmptyArray).toBe(promptWithoutArg);
+  });
+
+  it('renders every turn, oldest first, before EVIDENCE:', () => {
+    const prompt = buildAnswerPrompt('Compare and contrast these two papers.', [chunk()], undefined, undefined, history);
+
+    expect(prompt).toContain('CONVERSATION SO FAR');
+    expect(prompt).toContain('Which papers discuss factions?');
+    expect(prompt).toContain('No. 10 and No. 51 discuss factions.');
+    expect(prompt).toContain('Which one is most similar to No. 6?');
+    expect(prompt).toContain('No. 8 is most similar to No. 6.');
+    expect(prompt.indexOf('CONVERSATION SO FAR')).toBeLessThan(prompt.indexOf('EVIDENCE:'));
+    // Oldest first: the first turn's question appears before the second turn's question.
+    expect(prompt.indexOf('Which papers discuss factions?')).toBeLessThan(
+      prompt.indexOf('Which one is most similar to No. 6?'),
+    );
+  });
+
+  it('makes clear the block is context only, never a citation source', () => {
+    const prompt = buildAnswerPrompt('question', [chunk()], undefined, undefined, history);
+
+    expect(prompt.toLowerCase()).toMatch(/context only/);
+    expect(prompt.toLowerCase()).toMatch(/not evidence/);
+  });
+
+  it('combines correctly with a correction block and a currentPaper note (all present at once)', () => {
+    const prompt = buildAnswerPrompt(
+      'question',
+      [chunk()],
+      'fix your citations',
+      { paperNumber: 10, title: 'The Same Subject Continued' },
+      history,
+    );
+
+    expect(prompt).toContain('CONVERSATION SO FAR');
+    expect(prompt).toContain('CORRECTION: fix your citations');
+    expect(prompt).toContain('Federalist No. 10');
+  });
+});
+
+describe('ANSWER_SYSTEM_INSTRUCTION: conversation history is never a citation source', () => {
+  it('tells the model history is context only, not evidence', () => {
+    expect(ANSWER_SYSTEM_INSTRUCTION.toLowerCase()).toMatch(/conversation so far/);
+    expect(ANSWER_SYSTEM_INSTRUCTION.toLowerCase()).toMatch(/never a source of evidence/);
+  });
+});
+
+describe('buildRetrievalQuery', () => {
+  it('returns the raw question unchanged when history is empty', () => {
+    expect(buildRetrievalQuery('Why checks and balances?', [])).toBe(
+      'Why checks and balances?',
+    );
+  });
+
+  it('concatenates only the immediately preceding turn with the new question, not the full history', () => {
+    const history: ConversationTurn[] = [
+      { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51.' },
+      { question: 'Which one is most similar to No. 6?', answer: 'No. 8 is most similar to No. 6.' },
+    ];
+
+    const query = buildRetrievalQuery('Can you compare and contrast these two papers?', history);
+
+    expect(query).toContain('Which one is most similar to No. 6?');
+    expect(query).toContain('No. 8 is most similar to No. 6.');
+    expect(query).toContain('Can you compare and contrast these two papers?');
+    // The older, less relevant turn is deliberately excluded -- keeps the embedding call's input
+    // focused (this story's Boundaries).
+    expect(query).not.toContain('Which papers discuss factions?');
+    expect(query).not.toContain('No. 10 and No. 51.');
   });
 });
 

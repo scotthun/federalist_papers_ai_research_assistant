@@ -6,8 +6,14 @@ import {
 } from '@federalist-research/ai';
 import { LlmAnswerOutputSchema } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
+import type { ConversationTurn } from './answer-prompt';
 import { CLARIFY_THRESHOLD, CONFIDENT_THRESHOLD } from './answer-thresholds';
-import { AskService, PROVIDER_UNAVAILABLE_MESSAGE, REFUSE_MESSAGE } from './ask.service';
+import {
+  AskService,
+  CONTEXT_LENGTH_EXCEEDED_MESSAGE,
+  PROVIDER_UNAVAILABLE_MESSAGE,
+  REFUSE_MESSAGE,
+} from './ask.service';
 
 /**
  * Fakes both boundaries AskService composes through the real `retrieveRelevantChunks` (its own
@@ -913,6 +919,183 @@ describe('AskService', () => {
 
       const parsed = JSON.parse(logSpy.mock.calls[0][0]);
       expect(parsed.tierOverriddenByCurrentPaper).toBe(false);
+    });
+  });
+
+  // spec-conversation-history-context.md: `history` threads into (1) the retrieval query (built
+  // from only the immediately preceding turn) and (2) the generation prompt (the full history, as
+  // a "CONVERSATION SO FAR" block), and is never persisted or otherwise threaded anywhere else.
+  describe('conversation history (spec-conversation-history-context.md)', () => {
+    const history: ConversationTurn[] = [
+      { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51.' },
+      { question: 'Which one is most similar to No. 6?', answer: 'No. 8 is most similar to No. 6.' },
+    ];
+
+    it('builds the retrieval embedding query from only the immediately preceding turn plus the new question', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'They compare favorably.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Can you compare and contrast these two papers?', undefined, history);
+
+      expect(aiProvider.generateEmbedding).toHaveBeenCalledTimes(1);
+      const embeddedQuery = (aiProvider.generateEmbedding as jest.Mock).mock.calls[0][0];
+      expect(embeddedQuery).toContain('Which one is most similar to No. 6?');
+      expect(embeddedQuery).toContain('No. 8 is most similar to No. 6.');
+      expect(embeddedQuery).toContain('Can you compare and contrast these two papers?');
+      // The older, first turn is deliberately excluded from the retrieval query.
+      expect(embeddedQuery).not.toContain('Which papers discuss factions?');
+    });
+
+    it('passes the full history into the generation prompt as a CONVERSATION SO FAR block', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'They compare favorably.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Can you compare and contrast these two papers?', undefined, history);
+
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).toContain('CONVERSATION SO FAR');
+      // Both turns -- including the older one excluded from the retrieval query above -- appear
+      // in the prompt: the full (uncapped-by-default) history goes to the LLM, only the
+      // retrieval query is narrowed to the immediately preceding turn.
+      expect(call.prompt).toContain('Which papers discuss factions?');
+      expect(call.prompt).toContain('Which one is most similar to No. 6?');
+    });
+
+    it('carries history through to the one allowed retry prompt too', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockResolvedValueOnce({
+          answer: 'A fabricated answer.',
+          citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
+        })
+        .mockResolvedValueOnce({
+          answer: 'The corrected, grounded answer.',
+          citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+        });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Can you compare and contrast these two papers?', undefined, history);
+
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+      const retryCall = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[1][0];
+      expect(retryCall.prompt).toContain('CONVERSATION SO FAR');
+      expect(retryCall.prompt).toContain('Which one is most similar to No. 6?');
+    });
+
+    // AC: "Given the model attempts to cite a chunkId that only appeared in a previous turn's
+    // evidence, when verifyCitations runs, then it is still rejected exactly as it is today" --
+    // no code change to verifyCitations itself; this just confirms history doesn't create a new
+    // citation-bypass path now that the prompt actually carries prior conversation content.
+    it('still rejects a citation whose chunkId never appeared in this call\'s own retrieved chunks, even with history present', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A fabricated answer citing a chunk from an earlier turn.',
+        citations: [
+          { paperNumber: 8, paperTitle: 'Federalist No. 8', chunkId: 'chunk-from-a-prior-turn' },
+        ],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask(
+        'Can you compare and contrast these two papers?',
+        undefined,
+        history,
+      );
+
+      expect(result).toEqual({
+        answer: REFUSE_MESSAGE,
+        citations: [],
+        confidence: 'low',
+        insufficientEvidence: true,
+      });
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+    });
+
+    it('behaves byte-for-byte as before when history is omitted (no regression)', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Ambition must be made to counteract ambition.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?');
+
+      const embeddedQuery = (aiProvider.generateEmbedding as jest.Mock).mock.calls[0][0];
+      expect(embeddedQuery).toBe('Why checks and balances?');
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).not.toContain('CONVERSATION SO FAR');
+    });
+  });
+
+  // spec-conversation-history-context.md's second safety addition: a distinct, honest message
+  // for a provider rejection caused by the request (question + evidence + history) exceeding the
+  // model's context window -- must never repeat CLIENT_ERROR_MESSAGE's "not something your
+  // question caused" wording, since a too-long conversation genuinely is something the user's
+  // session caused.
+  describe('context_length_exceeded provider failure', () => {
+    it('shows CONTEXT_LENGTH_EXCEEDED_MESSAGE (pointing at Clear chat) when both attempts fail with that kind', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError(
+          '400 Bad Request: context length exceeded',
+          'context_length_exceeded',
+        ),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toBe(CONTEXT_LENGTH_EXCEEDED_MESSAGE);
+      expect(result.answer).not.toBe(REFUSE_MESSAGE);
+      expect(result.answer).not.toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+      expect(result.answer.toLowerCase()).not.toContain('not something your question caused');
+      expect(result.answer.toLowerCase()).toContain('clear chat');
+    });
+
+    it('prefers context_length_exceeded over any other failure kind from the other attempt', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockRejectedValueOnce(
+          new ProviderUnavailableError('429 Too Many Requests', 'rate_limited_daily'),
+        )
+        .mockRejectedValueOnce(
+          new ProviderUnavailableError('400 Bad Request', 'context_length_exceeded'),
+        );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toBe(CONTEXT_LENGTH_EXCEEDED_MESSAGE);
     });
   });
 

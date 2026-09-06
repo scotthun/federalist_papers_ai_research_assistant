@@ -25,6 +25,8 @@ import {
   buildEmptyCitationsCorrection,
   buildInvalidCitationCorrection,
   buildInvalidOutputCorrection,
+  buildRetrievalQuery,
+  type ConversationTurn,
   type CurrentPaper,
 } from './answer-prompt';
 import { decideAnswerTier, type AnswerTier } from './answer-thresholds';
@@ -69,6 +71,18 @@ const SERVER_ERROR_MESSAGE =
 const CLIENT_ERROR_MESSAGE =
   "There's a configuration problem with the AI provider connection (not something your question caused) -- this needs a developer to look at, not a retry.";
 
+/** Used instead of the generic `CLIENT_ERROR_MESSAGE` when the provider rejected the call because
+ *  the request -- question + evidence + conversation history -- exceeded the model's context
+ *  window (spec-conversation-history-context.md's second safety addition). Unlike every other
+ *  `client_error`/`server_error`/etc. message, this failure genuinely *is* something the user's
+ *  own session caused (an unusually long conversation), so it must never repeat
+ *  `CLIENT_ERROR_MESSAGE`'s "not something your question caused" wording -- and it points at the
+ *  concrete fix (the "Clear chat" control) rather than telling the user to wait or a developer to
+ *  investigate. */
+export const CONTEXT_LENGTH_EXCEEDED_MESSAGE =
+  "This conversation has grown too long for the AI model to process in one request -- " +
+  'please use "Clear chat" to start a new conversation and try asking again.';
+
 /** Picks the actual answer text for a fail-safe-to-refuse outcome. `kind`/`retryAfterSeconds`
  *  are `undefined` for the original "the provider returned a response but citation verification
  *  rejected it" case, which still gets the unchanged `REFUSE_MESSAGE` -- never any of the
@@ -86,6 +100,8 @@ function messageForFailureKind(kind?: ProviderFailureKind, retryAfterSeconds?: n
     case 'overloaded':
     case 'unavailable':
       return PROVIDER_UNAVAILABLE_MESSAGE;
+    case 'context_length_exceeded':
+      return CONTEXT_LENGTH_EXCEEDED_MESSAGE;
     case undefined:
       return REFUSE_MESSAGE;
   }
@@ -95,8 +111,14 @@ function messageForFailureKind(kind?: ProviderFailureKind, retryAfterSeconds?: n
  *  the first attempt and the retry failed with *different* kinds -- e.g. the first hit a daily
  *  quota and the retry (pointlessly) hit it again framed differently, or one was a transient 503
  *  and the other a genuine config error. Telling the user about the more specific/blocking cause
- *  is always at least as true and more useful than the vaguer one. */
+ *  is always at least as true and more useful than the vaguer one.
+ *
+ *  `context_length_exceeded` ranks first: unlike every other kind here, it names a cause the
+ *  user's own session created (an unusually long conversation) with a concrete, user-actionable
+ *  fix ("Clear chat") -- strictly more specific and more useful to surface than any transient
+ *  provider-side failure the other attempt might have hit instead. */
 const FAILURE_KIND_PRIORITY: ProviderFailureKind[] = [
+  'context_length_exceeded',
   'rate_limited_daily',
   'client_error',
   'rate_limited_short',
@@ -266,7 +288,16 @@ export class AskService {
   // version of this method threaded it into `retrieveRelevantChunks`'s `paperNumber` filter
   // option instead; that's been reverted (see the spec's Spec Change Log) because it made a
   // genuinely cross-paper question unanswerable while the chip was showing.
-  async ask(question: string, currentPaper?: CurrentPaper): Promise<Answer> {
+  async ask(
+    question: string,
+    currentPaper?: CurrentPaper,
+    /** Prior `done` question/answer turns, oldest first (spec-conversation-history-context.md) --
+     *  already validated/coerced/capped by `AskController` before this is ever called. Defaults
+     *  to `[]` so every existing caller (including this file's own tests) is unaffected: an empty
+     *  array produces byte-for-byte the same retrieval query and prompt as passing nothing at
+     *  all. */
+    history: ConversationTurn[] = [],
+  ): Promise<Answer> {
     const start = Date.now();
 
     // The embedding call inside retrieveRelevantChunks is common to every tier -- a tier can't
@@ -277,11 +308,19 @@ export class AskService {
     // hang or a fabricated 200 "insufficient evidence" answer that would misrepresent an outage
     // as a content outcome (I/O Edge-Case Matrix: "Embedding/LLM provider call fails ... Clear
     // error response ... Never a hang").
+    //
+    // The retrieval query itself is built from only the immediately preceding turn (this story's
+    // Boundaries), never the full history -- retrieveRelevantChunks's own signature/SQL are
+    // untouched, only the query *string* passed into it differs from the raw `question`.
+    const retrievalQuery = buildRetrievalQuery(question, history);
     let chunks: RetrievedChunk[];
     try {
-      chunks = await retrieveRelevantChunks(this.dataSource, this.embeddingProvider, question, {
-        topK: TOP_K,
-      });
+      chunks = await retrieveRelevantChunks(
+        this.dataSource,
+        this.embeddingProvider,
+        retrievalQuery,
+        { topK: TOP_K },
+      );
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       this.logRequest({
@@ -342,7 +381,7 @@ export class AskService {
       }
     }
 
-    const outcome = await this.resolveOutcome(tier, question, chunks, currentPaper);
+    const outcome = await this.resolveOutcome(tier, question, chunks, currentPaper, history);
 
     this.logRequest({
       question,
@@ -367,13 +406,15 @@ export class AskService {
     question: string,
     chunks: RetrievedChunk[],
     currentPaper?: CurrentPaper,
+    history: ConversationTurn[] = [],
   ): Promise<AnswerOutcome> {
     switch (tier) {
       case 'confident':
         // currentPaper is prompt context for the LLM only -- clarify/refuse below never run at
         // all when it's set (ask() forces this tier to 'confident' in that case), so there's
-        // nothing for either of them to thread it into.
-        return this.answerConfidently(question, chunks, currentPaper);
+        // nothing for either of them to thread it into. `history` is likewise LLM-prompt-only,
+        // so only this branch (the one that ever calls the LLM) needs it.
+        return this.answerConfidently(question, chunks, currentPaper, history);
       case 'clarify':
         // decideAnswerTier only returns 'clarify' when chunks[0] exists (a defined topScore
         // requires at least one chunk) -- the non-null assertion documents that invariant rather
@@ -396,10 +437,11 @@ export class AskService {
     question: string,
     chunks: RetrievedChunk[],
     currentPaper?: CurrentPaper,
+    history: ConversationTurn[] = [],
   ): Promise<AnswerOutcome> {
     const retrievedChunkIds = new Set(chunks.map((chunk) => chunk.chunkId));
 
-    const first = await this.tryGenerate(question, chunks, undefined, currentPaper);
+    const first = await this.tryGenerate(question, chunks, undefined, currentPaper, history);
     if (first.errorMessage === undefined) {
       const verification = verifyCitations(first.citations, retrievedChunkIds);
       if (verification.valid) {
@@ -428,6 +470,8 @@ export class AskService {
           ? 'first attempt returned zero citations'
           : `first attempt cited invalid chunkId(s): ${verification.invalidChunkIds.join(', ')}`,
         currentPaper,
+        undefined,
+        history,
       );
     }
 
@@ -439,6 +483,7 @@ export class AskService {
       `first attempt produced invalid output: ${first.errorMessage}`,
       currentPaper,
       first.providerFailureKind,
+      history,
     );
   }
 
@@ -454,8 +499,9 @@ export class AskService {
      *  verification failure instead). Combined with the retry's own outcome below to decide the
      *  final refuse message's wording. */
     firstFailureKind?: ProviderFailureKind,
+    history: ConversationTurn[] = [],
   ): Promise<AnswerOutcome> {
-    const retry = await this.tryGenerate(question, chunks, correction, currentPaper);
+    const retry = await this.tryGenerate(question, chunks, correction, currentPaper, history);
     if (retry.errorMessage === undefined) {
       const verification = verifyCitations(retry.citations, retrievedChunkIds);
       if (verification.valid) {
@@ -498,11 +544,12 @@ export class AskService {
     chunks: RetrievedChunk[],
     correction?: string,
     currentPaper?: CurrentPaper,
+    history: ConversationTurn[] = [],
   ): Promise<GenerateAttempt> {
     try {
       const output = await this.generationProvider.generateStructuredOutput({
         systemInstruction: ANSWER_SYSTEM_INSTRUCTION,
-        prompt: buildAnswerPrompt(question, chunks, correction, currentPaper),
+        prompt: buildAnswerPrompt(question, chunks, correction, currentPaper, history),
         schema: LlmAnswerOutputSchema,
       });
       return { answer: output.answer, citations: output.citations };

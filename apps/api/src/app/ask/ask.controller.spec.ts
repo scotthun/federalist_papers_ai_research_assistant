@@ -1,7 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import type { Answer } from '@federalist-research/shared';
-import { AskController } from './ask.controller';
+import { AskController, coerceHistory } from './ask.controller';
 import { AskService } from './ask.service';
 
 describe('AskController', () => {
@@ -210,6 +210,136 @@ describe('AskController', () => {
         paperTitle: '   \n\t  ',
       });
       expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+  });
+
+  // spec-conversation-history-context.md: an optional `history` array of prior question/answer
+  // pairs, sent by the quill panel on every ask. Validated/coerced defensively -- a malformed
+  // entry or field is never a 400 (this story's Boundaries).
+  describe('history (spec-conversation-history-context.md)', () => {
+    it('calls the service with a two-argument call (no history) when history is absent -- byte-for-byte unchanged', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({ question: 'Why checks and balances?' });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    it('forwards a valid history array, oldest first, as the third argument', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({
+        question: 'Can you compare and contrast these two papers?',
+        history: [
+          { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51.' },
+          { question: 'Which one is most similar to No. 6?', answer: 'No. 8.' },
+        ],
+      });
+
+      expect(service.ask).toHaveBeenCalledWith(
+        'Can you compare and contrast these two papers?',
+        undefined,
+        [
+          { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51.' },
+          { question: 'Which one is most similar to No. 6?', answer: 'No. 8.' },
+        ],
+      );
+    });
+
+    it('treats a non-array history as absent, not a 400', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        history: 'not an array' as unknown as unknown[],
+      });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    it('drops malformed entries (missing/non-string question or answer) rather than rejecting the whole field', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        history: [
+          { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51.' },
+          { question: 'missing answer' },
+          { question: 123, answer: 'non-string question' },
+          'not even an object',
+          null,
+        ] as unknown as unknown[],
+      });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined, [
+        { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51.' },
+      ]);
+    });
+
+    it('treats a history array with zero valid entries as absent, not an empty-array third argument', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await controller.ask({
+        question: 'Why checks and balances?',
+        history: [{ bogus: true }] as unknown as unknown[],
+      });
+
+      expect(service.ask).toHaveBeenCalledWith('Why checks and balances?', undefined);
+    });
+
+    it('never throws BadRequestException for a malformed history field', async () => {
+      service.ask.mockResolvedValue(fakeAnswer);
+
+      await expect(
+        controller.ask({
+          question: 'Why checks and balances?',
+          history: { not: 'an array' } as unknown as unknown[],
+        }),
+      ).resolves.toEqual(fakeAnswer);
+    });
+
+    // The shipped default is HISTORY_MAX_TURNS === null (no cap) -- this proves the rollback path
+    // (flipping it to a number) already works correctly, without needing to actually flip the
+    // shipped constant (this story's I/O matrix: "exercised by a test even though the shipped
+    // default is null, so the rollback path is proven to work before it's ever needed").
+    describe('HISTORY_MAX_TURNS rollback path (coerceHistory)', () => {
+      const fiveTurns = [
+        { question: 'Q1', answer: 'A1' },
+        { question: 'Q2', answer: 'A2' },
+        { question: 'Q3', answer: 'A3' },
+        { question: 'Q4', answer: 'A4' },
+        { question: 'Q5', answer: 'A5' },
+      ];
+
+      it('keeps every valid turn when maxTurns is null (the shipped default)', () => {
+        expect(coerceHistory(fiveTurns, null)).toEqual(fiveTurns);
+      });
+
+      it('keeps only the most recent maxTurns turns when set to a number', () => {
+        expect(coerceHistory(fiveTurns, 3)).toEqual([
+          { question: 'Q3', answer: 'A3' },
+          { question: 'Q4', answer: 'A4' },
+          { question: 'Q5', answer: 'A5' },
+        ]);
+      });
+
+      it('is a no-op when the conversation has not yet grown past the cap', () => {
+        expect(coerceHistory(fiveTurns, 10)).toEqual(fiveTurns);
+      });
+
+      it('applies the cap after dropping malformed entries, not before', () => {
+        const withOneMalformed = [
+          { question: 'Q1', answer: 'A1' },
+          { bogus: true },
+          { question: 'Q2', answer: 'A2' },
+          { question: 'Q3', answer: 'A3' },
+        ];
+
+        expect(coerceHistory(withOneMalformed, 2)).toEqual([
+          { question: 'Q2', answer: 'A2' },
+          { question: 'Q3', answer: 'A3' },
+        ]);
+      });
     });
   });
 });

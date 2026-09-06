@@ -176,6 +176,52 @@ describe('POST /api/ask (HTTP wiring)', () => {
     expect(fakeGenerateStructuredOutput).not.toHaveBeenCalled();
   });
 
+  // spec-conversation-history-context.md, end-to-end through a real HTTP round trip: the
+  // conversation the quill panel sends threads into both the retrieval embedding call (only the
+  // immediately preceding turn) and the generation prompt (the full history).
+  it('threads a sent history array into the retrieval query and the generation prompt', async () => {
+    fakeDbQuery.mockResolvedValue([fakeRetrievedChunkRow]);
+
+    const response = await fetch(`${baseUrl}/api/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: 'Can you compare and contrast these two papers?',
+        history: [
+          { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51.' },
+          {
+            question: 'Which one is most similar to No. 6?',
+            answer: 'No. 8 is most similar to No. 6.',
+          },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(fakeGenerateEmbedding).toHaveBeenCalledTimes(1);
+    const embeddedQuery = fakeGenerateEmbedding.mock.calls[0][0];
+    expect(embeddedQuery).toContain('Which one is most similar to No. 6?');
+    expect(embeddedQuery).toContain('Can you compare and contrast these two papers?');
+
+    const generationCall = fakeGenerateStructuredOutput.mock.calls[0][0];
+    expect(generationCall.prompt).toContain('CONVERSATION SO FAR');
+    expect(generationCall.prompt).toContain('Which papers discuss factions?');
+  });
+
+  it('behaves identically to before when history is malformed (a non-array), never a 400', async () => {
+    fakeDbQuery.mockResolvedValue([fakeRetrievedChunkRow]);
+
+    const response = await fetch(`${baseUrl}/api/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Why checks and balances?', history: 'not an array' }),
+    });
+
+    expect(response.status).toBe(200);
+    const embeddedQuery = fakeGenerateEmbedding.mock.calls[0][0];
+    expect(embeddedQuery).toBe('Why checks and balances?');
+  });
+
   // I/O Edge-Case Matrix: "Embedding/LLM provider call fails ... Clear error response ... Never
   // a hang." A real HTTP round trip proves Nest's default exception filter turns the rejected
   // promise into an actual 500 response, not a hang.
