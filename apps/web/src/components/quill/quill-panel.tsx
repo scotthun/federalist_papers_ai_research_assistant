@@ -87,6 +87,116 @@ function markConnectionLost(
 }
 
 /**
+ * Resets an existing answer message back to a fresh `streaming` state in place (same `id`, no new
+ * question/answer pair appended) -- used only by a retry (spec-chat-error-recovery-polish.md),
+ * which resends a question that already failed once rather than treating it as a brand-new turn.
+ */
+function resetToStreaming(
+  answerId: string,
+  setMessages: Dispatch<SetStateAction<QuillMessage[]>>,
+) {
+  setMessages((prev) =>
+    prev.map((message) =>
+      message.id === answerId && message.role === 'answer'
+        ? {
+            ...message,
+            status: 'streaming' as const,
+            text: '',
+            citations: [],
+            confidence: null,
+            insufficientEvidence: false,
+          }
+        : message,
+    ),
+  );
+}
+
+/**
+ * Shared by both a fresh submit and a retry (spec-chat-error-recovery-polish.md) -- the only
+ * difference between the two call sites is how `answerId`/`questionText`/`history` were derived,
+ * never how the request itself is sent, read, or how failures are reported. Extracted so a retry
+ * can never silently drift out of sync with a first attempt's behavior.
+ */
+async function sendAskRequest({
+  answerId,
+  questionText,
+  history,
+  paperContext,
+  abortController,
+  setMessages,
+}: {
+  answerId: string;
+  questionText: string;
+  history: Array<{ question: string; answer: string }>;
+  paperContext: { paperNumber: number; title: string } | null;
+  abortController: AbortController;
+  setMessages: Dispatch<SetStateAction<QuillMessage[]>>;
+}) {
+  try {
+    const response = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: questionText,
+        ...(paperContext
+          ? { paperNumber: paperContext.paperNumber, paperTitle: paperContext.title }
+          : {}),
+        ...(history.length > 0 ? { history } : {}),
+      }),
+      signal: abortController.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      markConnectionLost(answerId, setMessages);
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let receivedDone = false;
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      // The last split segment may be an incomplete line straddling this chunk and the next --
+      // held back in `buffer` rather than parsed early.
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const parsedEvent = parseAskStreamEventLine(line);
+        if (!parsedEvent) {
+          continue;
+        }
+        if (parsedEvent.type === 'token') {
+          appendToken(answerId, parsedEvent.text, setMessages);
+        } else {
+          receivedDone = true;
+          finalizeAnswer(answerId, parsedEvent, setMessages);
+        }
+      }
+    }
+
+    if (!receivedDone) {
+      // The stream closed (or, below, errored) before a `done` line ever arrived -- a dropped
+      // connection detected in this reader loop, not a thrown/unhandled rejection (I/O matrix).
+      markConnectionLost(answerId, setMessages);
+    }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      // An intentional cancellation (panel closed/unmounted, or a new question started) --
+      // not a dropped connection, so no error state and no console noise.
+      return;
+    }
+    console.error('Quill ask stream failed:', err);
+    markConnectionLost(answerId, setMessages);
+  }
+}
+
+/**
  * Builds the `history` array sent with the next `/api/ask` call (spec-conversation-history-
  * context.md): every prior `role: 'question'` turn immediately followed by a `role: 'answer'`
  * turn whose `status` is `'done'` AND whose `insufficientEvidence` is `false`, oldest first.
@@ -204,75 +314,64 @@ export function QuillPanel({
     ]);
     setQuestion('');
 
-    try {
-      const response = await fetch('/api/ask', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // paperContext (if present) is the same boolean/value that drove the chip's visibility
-        // when this question was submitted (Story 5.2's Boundaries) -- included only when
-        // non-null, so a dismissed/absent context never sends a stray paperNumber/paperTitle.
-        // apps/api threads this into the LLM's prompt as framing only (product-corrected
-        // 2026-09-02) -- it is never applied as a retrieval filter. `history` (spec-conversation-
-        // history-context.md) is included only when non-empty, so a first question's request
-        // body is byte-for-byte unchanged from before this story.
-        body: JSON.stringify({
-          question: trimmedQuestion,
-          ...(paperContext
-            ? { paperNumber: paperContext.paperNumber, paperTitle: paperContext.title }
-            : {}),
-          ...(history.length > 0 ? { history } : {}),
-        }),
-        signal: abortController.signal,
-      });
+    // paperContext (if present) is the same boolean/value that drove the chip's visibility when
+    // this question was submitted (Story 5.2's Boundaries) -- included only when non-null, so a
+    // dismissed/absent context never sends a stray paperNumber/paperTitle. apps/api threads this
+    // into the LLM's prompt as framing only (product-corrected 2026-09-02) -- it is never applied
+    // as a retrieval filter. `history` (spec-conversation-history-context.md) is included only
+    // when non-empty, so a first question's request body is byte-for-byte unchanged from before
+    // that story.
+    await sendAskRequest({
+      answerId,
+      questionText: trimmedQuestion,
+      history,
+      paperContext,
+      abortController,
+      setMessages,
+    });
+  }
 
-      if (!response.ok || !response.body) {
-        markConnectionLost(answerId, setMessages);
-        return;
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let receivedDone = false;
-
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) {
-          break;
-        }
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        // The last split segment may be an incomplete line straddling this chunk and the next --
-        // held back in `buffer` rather than parsed early.
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          const parsedEvent = parseAskStreamEventLine(line);
-          if (!parsedEvent) {
-            continue;
-          }
-          if (parsedEvent.type === 'token') {
-            appendToken(answerId, parsedEvent.text, setMessages);
-          } else {
-            receivedDone = true;
-            finalizeAnswer(answerId, parsedEvent, setMessages);
-          }
-        }
-      }
-
-      if (!receivedDone) {
-        // The stream closed (or, below, errored) before a `done` line ever arrived -- a dropped
-        // connection detected in this reader loop, not a thrown/unhandled rejection (I/O matrix).
-        markConnectionLost(answerId, setMessages);
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        // An intentional cancellation (panel closed/unmounted, or a new question started) --
-        // not a dropped connection, so no error state and no console noise.
-        return;
-      }
-      console.error('Quill ask stream failed:', err);
-      markConnectionLost(answerId, setMessages);
+  /**
+   * Resends a question whose answer ended in `connection-lost` (spec-chat-error-recovery-
+   * polish.md) -- in place, reusing the same answer message id rather than appending a new
+   * question/answer pair, so the conversation doesn't show the same question twice just because
+   * its first attempt failed. Guarded by `isStreaming` exactly like `handleSubmit` (this story's
+   * Boundaries: never a second in-flight request, retry included). Uses the *current* paper
+   * context, not whatever was active when the original question was first asked -- consistent
+   * with how a brand-new send always uses the current context, and simpler than threading a
+   * second, historical context through every retry.
+   */
+  function handleRetry(answerId: string) {
+    if (isStreaming) {
+      return;
     }
+    const answerIndex = messages.findIndex((message) => message.id === answerId);
+    if (answerIndex <= 0) {
+      return;
+    }
+    const questionMessage = messages[answerIndex - 1];
+    if (questionMessage.role !== 'question') {
+      return;
+    }
+
+    abortControllerRef.current?.abort();
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
+    // Only turns strictly before the original question -- mirrors handleSubmit's own "history is
+    // everything prior to this turn" contract exactly, never including the turn being retried.
+    const history = buildHistory(messages.slice(0, answerIndex - 1));
+
+    resetToStreaming(answerId, setMessages);
+
+    void sendAskRequest({
+      answerId,
+      questionText: questionMessage.text,
+      history,
+      paperContext,
+      abortController,
+      setMessages,
+    });
   }
 
   /**
@@ -358,7 +457,13 @@ export function QuillPanel({
           message.role === 'question' ? (
             <QuestionBubble key={message.id} text={message.text} />
           ) : (
-            <AnswerBubble key={message.id} message={message} onCitationClick={onCollapse} />
+            <AnswerBubble
+              key={message.id}
+              message={message}
+              onCitationClick={onCollapse}
+              onRetry={handleRetry}
+              retryDisabled={isStreaming}
+            />
           ),
         )}
       </div>
@@ -399,14 +504,51 @@ function QuestionBubble({ text }: { text: string }) {
   );
 }
 
+/** How long a message stays `streaming` before its caption switches from "streaming…" to a
+ *  longer-wait notice (spec-chat-error-recovery-polish.md) -- the confident tier's whole answer is
+ *  already fully generated *before* the first token ever streams (ask-stream.ts's own doc
+ *  comment), so almost this entire window is really "waiting on the upstream LLM call to finish,"
+ *  not the token-by-token reveal itself. Exported so the spec's test can reference the same
+ *  literal instead of re-declaring it. */
+export const LONG_WAIT_NOTICE_DELAY_MS = 15_000;
+
 function AnswerBubble({
   message,
   onCitationClick,
+  onRetry,
+  retryDisabled,
 }: {
   message: Extract<QuillMessage, { role: 'answer' }>;
   onCitationClick: () => void;
+  onRetry: (answerId: string) => void;
+  /** True while any request (a fresh send, or another message's retry) is already in flight --
+   *  mirrors the main send control's own disabled state, so Retry can never itself trigger the
+   *  double-submit `handleRetry` already guards against server-side; this is purely about not
+   *  presenting a clickable-looking control that would silently no-op. */
+  retryDisabled: boolean;
 }) {
   const isStreaming = message.status === 'streaming';
+  // A one-way flip past LONG_WAIT_NOTICE_DELAY_MS, not a live countdown -- the wait's actual
+  // duration is unknowable up front (it depends on the upstream provider), so this only ever
+  // needs to answer "has it been unusually long yet?", never "how much longer?". Reset to `false`
+  // whenever streaming starts fresh (message.id changes on retry -- resetToStreaming reuses the
+  // same id, so message.id alone wouldn't re-arm the timer on a retry of the *same* message,
+  // hence keying on `isStreaming` transitioning true->true is intentionally avoided below by also
+  // depending on message.id, which is stable across a retry -- the dependency that actually
+  // re-arms it is `isStreaming` itself flipping from `false` back to `true`).
+  const [isLongWait, setIsLongWait] = useState(false);
+
+  useEffect(() => {
+    if (!isStreaming) {
+      setIsLongWait(false);
+      return;
+    }
+    const timer = setTimeout(() => setIsLongWait(true), LONG_WAIT_NOTICE_DELAY_MS);
+    return () => clearTimeout(timer);
+    // message.id intentionally not a dependency: resetToStreaming reuses the same id on retry,
+    // and isStreaming alone already captures every transition that should (re)arm or clear this
+    // timer.
+  }, [isStreaming]);
 
   return (
     <div className="flex justify-start">
@@ -425,13 +567,27 @@ function AnswerBubble({
         </p>
 
         {isStreaming && (
-          <p className="mt-1 text-xs italic text-quill-ink-muted">streaming…</p>
+          <p className="mt-1 text-xs italic text-quill-ink-muted">
+            {isLongWait
+              ? 'Still working — this is taking longer than usual…'
+              : 'streaming…'}
+          </p>
         )}
 
         {message.status === 'connection-lost' && (
-          <p role="alert" className="mt-1 text-xs text-quill-accent">
-            Connection lost — try asking again.
-          </p>
+          <div className="mt-1 flex items-center gap-2">
+            <p role="alert" className="text-xs text-quill-accent">
+              Connection lost — try asking again.
+            </p>
+            <button
+              type="button"
+              onClick={() => onRetry(message.id)}
+              disabled={retryDisabled}
+              className="rounded px-1.5 py-0.5 text-xs font-medium text-quill-accent underline decoration-dotted hover:bg-quill-surface-highlight disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold"
+            >
+              Retry
+            </button>
+          </div>
         )}
 
         {message.status === 'done' && message.citations.length > 0 && (
