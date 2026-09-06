@@ -295,6 +295,53 @@ describe('GeminiProvider', () => {
           expect(err.kind).toBe('client_error');
         });
       });
+
+      // spec-conversation-history-context.md: a too-long conversation (question + evidence +
+      // full history) rejected by the model gets its own honest kind -- Gemini returns a plain
+      // 400 for this with no dedicated status/error-detail shape, so it's detected by matching
+      // the error message's wording rather than any structured field.
+      describe('context_length_exceeded (spec-conversation-history-context.md)', () => {
+        function fetchErrorWithMessage(status: number, message: string) {
+          const err = new Error(message);
+          return Object.assign(err, { status });
+        }
+
+        it('classifies a 400 whose message mentions context length as context_length_exceeded, not client_error', async () => {
+          invoke.mockRejectedValue(
+            fetchErrorWithMessage(
+              400,
+              '[400] The input token count exceeds the maximum context length allowed.',
+            ),
+          );
+          const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+          const promise = provider.generateStructuredOutput({
+            systemInstruction: 'sys',
+            prompt: 'prompt',
+            schema: outputSchema,
+          });
+
+          await promise.catch((err) => {
+            expect(err.kind).toBe('context_length_exceeded');
+            expect(err.kind).not.toBe('client_error');
+          });
+        });
+
+        it('still classifies an ordinary 400 with no context-length wording as client_error', async () => {
+          invoke.mockRejectedValue(fetchErrorWithMessage(400, '[400] invalid request'));
+          const provider = new GeminiProvider({ apiKey: 'test-key' });
+
+          const promise = provider.generateStructuredOutput({
+            systemInstruction: 'sys',
+            prompt: 'prompt',
+            schema: outputSchema,
+          });
+
+          await promise.catch((err) => {
+            expect(err.kind).toBe('client_error');
+          });
+        });
+      });
     });
 
     it('never retries internally -- exactly one invoke call per invocation', async () => {

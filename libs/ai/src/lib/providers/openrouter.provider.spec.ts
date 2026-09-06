@@ -242,6 +242,45 @@ describe('OpenRouterProvider', () => {
           expect(err.kind).toBe('client_error');
         });
       });
+
+      // spec-conversation-history-context.md: a too-long conversation (question + evidence +
+      // full history) rejected by the model gets its own honest kind. OpenRouter's OpenAI-
+      // compatible error body has no dedicated status/field for this any more than Gemini's does,
+      // so it's detected by matching the error body's message wording.
+      describe('context_length_exceeded (spec-conversation-history-context.md)', () => {
+        it('classifies a 400 whose error message mentions context length as context_length_exceeded, not client_error', async () => {
+          invoke.mockRejectedValue(
+            apiError(400, { message: 'This model\'s maximum context length is 8192 tokens.' }),
+          );
+          const provider = new OpenRouterProvider({ apiKey: 'test-key' });
+
+          const promise = provider.generateStructuredOutput({
+            systemInstruction: 'sys',
+            prompt: 'prompt',
+            schema: outputSchema,
+          });
+
+          await promise.catch((err) => {
+            expect(err.kind).toBe('context_length_exceeded');
+            expect(err.kind).not.toBe('client_error');
+          });
+        });
+
+        it('still classifies an ordinary 400 with no context-length wording as client_error', async () => {
+          invoke.mockRejectedValue(apiError(400, { message: 'invalid request body' }));
+          const provider = new OpenRouterProvider({ apiKey: 'test-key' });
+
+          const promise = provider.generateStructuredOutput({
+            systemInstruction: 'sys',
+            prompt: 'prompt',
+            schema: outputSchema,
+          });
+
+          await promise.catch((err) => {
+            expect(err.kind).toBe('client_error');
+          });
+        });
+      });
     });
 
     it('never retries internally -- exactly one invoke call per invocation', async () => {

@@ -60,6 +60,21 @@ function isDailyQuota(errorDetails: GoogleGenerativeAIFetchErrorShape['errorDeta
   );
 }
 
+/** `true` when the error's own message indicates the request (question + evidence + conversation
+ *  history) exceeded the model's context window -- Gemini returns a plain 400 for this with no
+ *  dedicated status/error-detail shape of its own (spec-conversation-history-context.md), so this
+ *  is message-content matching rather than a structured field, mirroring `isDailyQuota`'s own
+ *  fallback-to-wording approach for the same reason. Deliberately broad (matches any of several
+ *  wordings a provider might use) so a reworded-but-still-context-length message doesn't silently
+ *  fall through to the generic `client_error` bucket, which would tell the user "a developer
+ *  needs to look at this" for something they can fix themselves by clearing the chat. */
+function isContextLengthExceededMessage(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return /context length|context window|token limit|maximum.*tokens|context_length_exceeded/i.test(
+    message,
+  );
+}
+
 /** Classifies a caught error into a `ProviderFailureKind` + optional retry hint, from whatever
  *  HTTP status/error-detail metadata is available -- `err` may not even be a real HTTP error at
  *  all (a plain network failure/timeout has no `.status`), so every field here is read
@@ -83,6 +98,11 @@ function classifyFetchError(err: unknown): {
   }
   if (status >= 500) {
     return { kind: 'server_error' };
+  }
+  // A context-length-exceeded rejection is itself a 4xx (usually 400) -- checked before the
+  // generic 4xx fallback below so it isn't misclassified as a config problem the user can't fix.
+  if (isContextLengthExceededMessage(err)) {
+    return { kind: 'context_length_exceeded' };
   }
   // Any other 4xx (400 malformed request, 401/403 auth/permission) -- a configuration/
   // programming problem, not something transient. Still classified (not rethrown as-is): the

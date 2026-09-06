@@ -21,6 +21,13 @@ import type { ZodType } from 'zod';
  *   one-allowed-retry policy) can fix.
  * - `unavailable` -- no HTTP status at all (network failure, timeout) -- the call never reached
  *   the provider or never got a response.
+ * - `context_length_exceeded` -- spec-conversation-history-context.md: a 400 whose body indicates
+ *   the request (question + evidence + conversation history) exceeded the model's context
+ *   window. Providers return a plain 400 for this with no dedicated status code, so it's detected
+ *   by message-content matching rather than status alone -- see each provider's own
+ *   `classifyFetchError`/`classifyOpenRouterError`. Distinct from `client_error` because, unlike
+ *   every other 4xx here, this one *is* something the user's own session caused (an unusually
+ *   long conversation) and has a concrete fix (clearing the chat), not a developer-only one.
  */
 export type ProviderFailureKind =
   | 'rate_limited_daily'
@@ -28,7 +35,8 @@ export type ProviderFailureKind =
   | 'overloaded'
   | 'server_error'
   | 'client_error'
-  | 'unavailable';
+  | 'unavailable'
+  | 'context_length_exceeded';
 
 /**
  * Thrown by `generateStructuredOutput`/`generateEmbedding` implementations specifically when the

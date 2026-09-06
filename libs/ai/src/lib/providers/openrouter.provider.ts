@@ -62,6 +62,23 @@ function isDailyQuotaMessage(message: string | undefined): boolean {
   return /\bday\b|\bdaily\b|per[- ]day/i.test(message);
 }
 
+/** `true` when the error body's message indicates the request (question + evidence + conversation
+ *  history) exceeded the model's context window -- OpenRouter's OpenAI-compatible shape has no
+ *  dedicated status/field for this any more than Gemini's does (spec-conversation-history-
+ *  context.md), so this is message-content matching, mirroring `isDailyQuotaMessage`'s own
+ *  fallback-to-wording approach and `gemini.provider.ts`'s identical
+ *  `isContextLengthExceededMessage` helper. Deliberately broad for the same reason as that
+ *  sibling helper: a reworded-but-still-context-length message must not silently fall through to
+ *  the generic `client_error` bucket. */
+function isContextLengthExceededMessage(message: string | undefined): boolean {
+  if (!message) {
+    return false;
+  }
+  return /context length|context window|token limit|maximum.*tokens|context_length_exceeded/i.test(
+    message,
+  );
+}
+
 /** Classifies a caught error into a `ProviderFailureKind` + optional retry hint, from whatever
  *  HTTP status/error-body metadata is available -- `err` may not even be a real HTTP error at all
  *  (a plain network failure/timeout has no `.status`), so every field here is read defensively
@@ -87,6 +104,11 @@ function classifyOpenRouterError(err: unknown): {
   }
   if (status >= 500) {
     return { kind: 'server_error' };
+  }
+  // A context-length-exceeded rejection is itself a 4xx (usually 400) -- checked before the
+  // generic 4xx fallback below so it isn't misclassified as a config problem the user can't fix.
+  if (isContextLengthExceededMessage(error?.message)) {
+    return { kind: 'context_length_exceeded' };
   }
   // Any other 4xx (400 malformed request, 401/403 auth/permission) -- a configuration/
   // programming problem, not something transient (mirrors gemini.provider.ts's identical
