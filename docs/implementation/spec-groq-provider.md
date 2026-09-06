@@ -34,17 +34,24 @@ deferred:
       libs/ai/src/lib/providers/{gemini,openrouter,groq}.provider.ts
     severity: low
   - summary: >-
-      openai/gpt-oss-120b's free-tier throughput cap (8,000 tokens/minute) could be consumed by a
-      single large prompt, given this app's conversation history is uncapped by default.
+      CONFIRMED LIVE, not just theoretical (2026-09-06, post-merge manual testing): openai/gpt-oss-
+      120b's free-tier 8,000 tokens/minute throughput cap gets exceeded by a single grounded-RAG
+      prompt once a conversation has real history in it, returning a 413 Groq did not originally
+      classify correctly.
     evidence: |-
-      Researched during this story: gpt-oss-120b's real context window is 131K tokens (large), so
-      this is not a per-request rejection risk -- but the 8K TPM figure is an aggregate throughput
-      rate limit, and a single unusually long conversation history could still consume most/all of
-      it in one call, effectively rate-limiting the next request in the same minute. Interacts with
-      spec-conversation-history-context.md's HISTORY_MAX_TURNS=null default; the documented
-      rollback (flip to a number) would also mitigate this if it becomes a real problem.
+      Live error: "413 Request too large ... on tokens per minute (TPM): Limit 8000, Requested
+      11693 ... please reduce your message size". This is not a rare edge case -- it happened on
+      the second follow-up question in a real test conversation (paper 10 -> paper 11 comparison
+      with history threaded in). Patched same day: classifyGroqError's context-length regex now
+      also matches "request too large"/"reduce your message size" (Groq's actual wording), so this
+      now correctly surfaces as context_length_exceeded (pointing the user at the existing "Clear
+      chat" control) instead of the misleading generic client_error "developer needs to look at
+      this" message. New test added. Still deferred/not fully resolved: Groq's 8K TPM budget is
+      genuinely small relative to this app's uncapped-by-default conversation history, so this will
+      likely recur on any multi-turn Groq conversation -- HISTORY_MAX_TURNS (currently null) is the
+      documented rollback if this proves too frequent in practice.
     location: >-
-      apps/api/.env.example (GROQ_API_KEY comment)
+      libs/ai/src/lib/providers/groq.provider.ts (isContextLengthExceededMessage)
     severity: low
 ---
 

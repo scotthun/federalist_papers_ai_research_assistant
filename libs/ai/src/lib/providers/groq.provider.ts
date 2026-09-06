@@ -68,12 +68,21 @@ function isDailyQuotaMessage(message: string | undefined): boolean {
  *  history) exceeded the model's context window -- Groq's OpenAI-compatible shape has no dedicated
  *  status/field for this any more than OpenRouter's or Gemini's does (spec-conversation-history-
  *  context.md), so this is message-content matching, identical to `openrouter.provider.ts`'s
- *  `isContextLengthExceededMessage` and `gemini.provider.ts`'s own helper of the same name. */
+ *  `isContextLengthExceededMessage` and `gemini.provider.ts`'s own helper of the same name.
+ *
+ *  Extended (confirmed live, 2026-09-06) with Groq-specific wording: unlike Gemini/OpenRouter,
+ *  Groq's free-tier token-per-minute (TPM) budget is small enough (8,000 for `openai/gpt-oss-120b`)
+ *  that a single grounded-RAG prompt (evidence + conversation history) can exceed it in one call --
+ *  observed live as `413 Request too large ... on tokens per minute (TPM): Limit 8000, Requested
+ *  11693 ... please reduce your message size`, which the original context-length/token-limit
+ *  wording alone did not match, so it fell through to the generic `client_error` bucket instead
+ *  (misleadingly telling the user "a developer needs to look at this" for what is, functionally,
+ *  the exact same "conversation got too long" case `context_length_exceeded` already exists for). */
 function isContextLengthExceededMessage(message: string | undefined): boolean {
   if (!message) {
     return false;
   }
-  return /context length|context window|token limit|maximum.*tokens|context_length_exceeded/i.test(
+  return /context length|context window|token limit|maximum.*tokens|context_length_exceeded|request too large|reduce your message size/i.test(
     message,
   );
 }

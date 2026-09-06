@@ -280,6 +280,34 @@ describe('GroqProvider', () => {
             expect(err.kind).toBe('client_error');
           });
         });
+
+        // Confirmed live (2026-09-06): a grounded-RAG prompt (evidence + conversation history)
+        // exceeding Groq's small free-tier tokens-per-minute (TPM) budget for openai/gpt-oss-120b
+        // comes back as a 413, not a 400/429, with wording ("Request too large ... please reduce
+        // your message size") the original context-length regex didn't match -- it fell through to
+        // the generic client_error bucket, misleadingly telling the user "a developer needs to look
+        // at this" for what is functionally the same "conversation got too long" case
+        // context_length_exceeded already exists for.
+        it('classifies a 413 "request too large" (Groq\'s TPM-budget wording) as context_length_exceeded, not client_error', async () => {
+          invoke.mockRejectedValue(
+            apiError(413, {
+              message:
+                'Request too large for model `openai/gpt-oss-120b` ... on tokens per minute (TPM): Limit 8000, Requested 11693, please reduce your message size and try again.',
+            }),
+          );
+          const provider = new GroqProvider({ apiKey: 'test-key' });
+
+          const promise = provider.generateStructuredOutput({
+            systemInstruction: 'sys',
+            prompt: 'prompt',
+            schema: outputSchema,
+          });
+
+          await promise.catch((err) => {
+            expect(err.kind).toBe('context_length_exceeded');
+            expect(err.kind).not.toBe('client_error');
+          });
+        });
       });
     });
 
