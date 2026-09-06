@@ -98,7 +98,7 @@ describe('QuillWidget', () => {
             paperTitle:
               'The Structure of the Government Must Furnish the Proper Checks and Balances',
             chunkId: 'chunk-1',
-            quotedPassage: 'Ambition must counteract ambition.',
+            quotedPassage: 'The great security against a gradual concentration of power.',
           },
         ],
         confidence: 'high',
@@ -126,6 +126,11 @@ describe('QuillWidget', () => {
       name: /No\. 51/,
     });
     expect(citationLink).toBeTruthy();
+    // spec-citation-display-differentiation.md: the citation's quotedPassage renders as a visible
+    // snippet under the link.
+    expect(
+      screen.getByText('The great security against a gradual concentration of power.'),
+    ).toBeTruthy();
   });
 
   it('renders a clarify/refuse-tier answer instantly with no cursor', async () => {
@@ -163,7 +168,7 @@ describe('QuillWidget', () => {
             paperTitle:
               'The Structure of the Government Must Furnish the Proper Checks and Balances',
             chunkId: 'chunk-1',
-            quotedPassage: 'Ambition must counteract ambition.',
+            quotedPassage: 'The great security against a gradual concentration of power.',
           },
         ],
         confidence: 'high',
@@ -176,7 +181,7 @@ describe('QuillWidget', () => {
 
     const citationLink = await screen.findByRole('link', { name: /No\. 51/ });
     expect(citationLink.getAttribute('href')).toBe(
-      `/papers/51?highlight=${encodeURIComponent('Ambition must counteract ambition.')}#cited-passage`,
+      `/papers/51?highlight=${encodeURIComponent('The great security against a gradual concentration of power.')}#cited-passage`,
     );
 
     fireEvent.click(citationLink);
@@ -213,6 +218,173 @@ describe('QuillWidget', () => {
 
     const citationLink = await screen.findByRole('link', { name: /No\. 78/ });
     expect(citationLink.getAttribute('href')).toBe('/papers/78');
+    // spec-citation-display-differentiation.md: no quotedPassage -> the list item is link-only,
+    // no snippet line, no empty/broken paragraph.
+    expect(citationLink.closest('li')?.querySelectorAll('p')).toHaveLength(0);
+  });
+
+  // spec-citation-display-differentiation.md: multiple citations from the same paper (a common,
+  // correct outcome) previously rendered as identical "No. N — Title" lines with nothing
+  // distinguishing them; each citation's quotedPassage now renders as its own snippet so same-
+  // paper citations read as distinct grounded quotes rather than a duplication bug.
+  describe('citation snippet differentiation (spec-citation-display-differentiation.md)', () => {
+    it('shows each citation its own distinct snippet when multiple citations cite the same paper', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'No. 4 discusses several distinct dangers from foreign force and influence.',
+          citations: [
+            {
+              paperNumber: 4,
+              paperTitle: 'The Same Subject Continued',
+              chunkId: 'chunk-a',
+              quotedPassage: 'Absolute monarchs will often make war when their nations are to gain.',
+            },
+            {
+              paperNumber: 4,
+              paperTitle: 'The Same Subject Continued',
+              chunkId: 'chunk-b',
+              quotedPassage: 'The safety of the people doth require it.',
+            },
+            {
+              paperNumber: 4,
+              paperTitle: 'The Same Subject Continued',
+              chunkId: 'chunk-c',
+              quotedPassage: 'Nations in general will make war whenever they have a prospect of getting anything.',
+            },
+            {
+              paperNumber: 4,
+              paperTitle: 'The Same Subject Continued',
+              chunkId: 'chunk-d',
+              quotedPassage: 'Men of this class have hurried out into wars.',
+            },
+          ],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      await openPanel();
+      await askQuestion('What dangers does No. 4 discuss?');
+
+      let links: HTMLElement[] = [];
+      await waitFor(() => {
+        links = screen.getAllByRole('link', { name: /No\. 4, The Same Subject Continued/ });
+        expect(links).toHaveLength(4);
+      });
+
+      // Scoped to each citation's own <li> (not just "exists somewhere on the page") -- proves
+      // snippet i is actually paired with citation i's link, not merely that all four snippet
+      // strings are present anywhere in the document (spec-citation-display-differentiation.md;
+      // this scoping mirrors the sibling "no quotedPassage" test's `closest('li')` pattern, which
+      // the original version of this test didn't reuse).
+      const expectedSnippetsInOrder = [
+        'Absolute monarchs will often make war when their nations are to gain.',
+        'The safety of the people doth require it.',
+        'Nations in general will make war whenever they have a prospect of getting anything.',
+        'Men of this class have hurried out into wars.',
+      ];
+      links.forEach((link, i) => {
+        const li = link.closest('li');
+        expect(li?.textContent).toContain(expectedSnippetsInOrder[i]);
+      });
+    });
+
+    it('renders a quotedPassage shorter than the truncation cap in full, with no ellipsis', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'A short answer.',
+          citations: [
+            {
+              paperNumber: 10,
+              paperTitle: 'The Same Subject Continued',
+              chunkId: 'chunk-1',
+              quotedPassage: 'A short quote.',
+            },
+          ],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      await openPanel();
+      await askQuestion('Why factions?');
+
+      expect(await screen.findByText('A short quote.')).toBeTruthy();
+    });
+
+    it('truncates a quotedPassage longer than the cap with an ellipsis', async () => {
+      const longPassage =
+        'This is a very long quoted passage that goes on and on well past the truncation ' +
+        'cap so that the rendered snippet must be cut short with a trailing ellipsis mark.';
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'A long answer.',
+          citations: [
+            {
+              paperNumber: 10,
+              paperTitle: 'The Same Subject Continued',
+              chunkId: 'chunk-1',
+              quotedPassage: longPassage,
+            },
+          ],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      await openPanel();
+      await askQuestion('Why factions?');
+
+      await screen.findByRole('link', { name: /No\. 10/ });
+      expect(screen.queryByText(longPassage)).toBeNull();
+      const truncated = screen.getByText(/…$/);
+      const truncatedText = truncated.textContent ?? '';
+      expect(truncatedText.length).toBeLessThan(longPassage.length);
+      expect(longPassage.startsWith(truncatedText.slice(0, -1))).toBe(true);
+    });
+
+    it('shows each paper its own heading and its own snippet across citations from different papers', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'Both papers touch on this.',
+          citations: [
+            {
+              paperNumber: 10,
+              paperTitle: 'The Same Subject Continued',
+              chunkId: 'chunk-1',
+              quotedPassage: 'The influence of factious leaders may kindle a flame.',
+            },
+            {
+              paperNumber: 51,
+              paperTitle:
+                'The Structure of the Government Must Furnish the Proper Checks and Balances',
+              chunkId: 'chunk-2',
+              quotedPassage: 'Ambition must be made to counteract ambition.',
+            },
+          ],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      await openPanel();
+      await askQuestion('Compare No. 10 and No. 51.');
+
+      const link10 = await screen.findByRole('link', { name: /No\. 10/ });
+      const link51 = screen.getByRole('link', { name: /No\. 51/ });
+      // Scoped to each citation's own <li>, not just "exists somewhere on the page" -- see the
+      // same-paper test above for why this matters (spec-citation-display-differentiation.md).
+      expect(link10.closest('li')?.textContent).toContain(
+        'The influence of factious leaders may kindle a flame.',
+      );
+      expect(link51.closest('li')?.textContent).toContain(
+        'Ambition must be made to counteract ambition.',
+      );
+    });
   });
 
   it('shows an inline "Connection lost" message and re-enables the send control when the stream ends without a done event', async () => {
