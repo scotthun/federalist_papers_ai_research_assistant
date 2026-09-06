@@ -14,6 +14,7 @@ import {
   type AskStreamEvent,
 } from '@/lib/ask-stream';
 import { cn } from '@/lib/utils';
+import { truncateCitationSnippet } from '@/lib/citation-snippet';
 import { CHAT_HISTORY_SESSION_KEY, type QuillMessage } from './quill-widget';
 
 type PanelProps = {
@@ -449,6 +450,11 @@ function AnswerBubble({
                 >
                   No. {citation.paperNumber} — {citation.paperTitle}
                 </Link>
+                {citation.quotedPassage && (
+                  <p className="mt-0.5 pl-1 text-xs italic text-quill-ink-muted">
+                    {truncateCitationSnippet(citation.quotedPassage)}
+                  </p>
+                )}
               </li>
             ))}
           </ul>
