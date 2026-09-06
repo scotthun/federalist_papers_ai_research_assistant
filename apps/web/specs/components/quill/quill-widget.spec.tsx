@@ -1026,5 +1026,60 @@ describe('QuillWidget', () => {
         screen.getByText('Ask a question about the Federalist Papers.'),
       ).toBeTruthy();
     });
+
+    // spec-chat-nice-to-haves.md
+    it('turns the "Clear chat" phrase inside a refuse-tier answer into a real clickable trigger for the same action', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer:
+            'This conversation has grown too long for the AI model to process in one request -- ' +
+            'please use "Clear chat" to start a new conversation and try asking again.',
+          citations: [],
+          confidence: 'low',
+          insufficientEvidence: true,
+        },
+      ]);
+
+      await openPanel();
+      await askQuestion('Why checks and balances?');
+
+      const inlineTrigger = await screen.findByRole('button', { name: '"Clear chat"' });
+      fireEvent.click(inlineTrigger);
+
+      expect(screen.queryByText('Why checks and balances?')).toBeNull();
+      expect(
+        screen.getByText('Ask a question about the Federalist Papers.'),
+      ).toBeTruthy();
+    });
+  });
+
+  // spec-chat-nice-to-haves.md
+  it('applies an entrance-animation class to a newly-attached citations list', async () => {
+    mockAskFetchStream([
+      {
+        type: 'done',
+        answer: 'Ambition must counteract ambition.',
+        citations: [
+          {
+            paperNumber: 51,
+            paperTitle:
+              'The Structure of the Government Must Furnish the Proper Checks and Balances',
+            chunkId: 'chunk-1',
+            quotedPassage: 'The great security against a gradual concentration of power.',
+          },
+        ],
+        confidence: 'high',
+        insufficientEvidence: false,
+      },
+    ]);
+
+    const { container } = render(<QuillWidget />);
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+    await askQuestion('Why checks and balances?');
+
+    await waitFor(() => {
+      expect(container.querySelector('ul.quill-citations-fade-in')).not.toBeNull();
+    });
   });
 });
