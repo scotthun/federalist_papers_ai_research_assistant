@@ -18,7 +18,12 @@ import {
   type Citation,
 } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
-import { EMBEDDING_PROVIDER, GENERATION_PROVIDER } from '../ai-provider.provider';
+import {
+  EMBEDDING_PROVIDER,
+  GENERATION_PROVIDER,
+  PAPER_REFERENCE_EXTRACTOR,
+} from '../ai-provider.provider';
+import type { PaperReferenceExtractor } from './paper-reference-extractor';
 import {
   ANSWER_SYSTEM_INSTRUCTION,
   buildAnswerPrompt,
@@ -38,6 +43,14 @@ import { verifyCitations } from './verify-citations';
  *  grounded answer, not just the bare top-1") is explicit rather than implicit in an omitted
  *  option. */
 const TOP_K = DEFAULT_TOP_K;
+
+/** Caps how many distinct paper numbers explicitly named in a question get pinned as extra
+ *  evidence (spec-explicit-paper-number-pinning.md) -- prevents a question like "summarize papers
+ *  1 through 85" from pinning the entire corpus into one prompt and guaranteeing a
+ *  `context_length_exceeded` refusal (spec-conversation-history-context.md) on every such
+ *  question. Enforced here in `AskService`, applied to whatever `PaperReferenceExtractor` returns
+ *  regardless of implementation -- not the extractor's own responsibility. */
+export const MAX_EXPLICIT_PAPER_PINS = 5;
 
 export const REFUSE_MESSAGE =
   "I couldn't find sufficient evidence in the Federalist Papers to answer that confidently.";
@@ -281,6 +294,8 @@ export class AskService {
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(EMBEDDING_PROVIDER) private readonly embeddingProvider: EmbeddingProvider,
     @Inject(GENERATION_PROVIDER) private readonly generationProvider: GenerationProvider,
+    @Inject(PAPER_REFERENCE_EXTRACTOR)
+    private readonly paperReferenceExtractor: PaperReferenceExtractor,
   ) {}
 
   // `currentPaper` (Story 5.2, product-corrected 2026-09-02) is prompt context only -- retrieval
@@ -345,41 +360,100 @@ export class AskService {
     // sees -- it does nothing about *whether* the LLM gets called at all, and a meta/summary-
     // style question ("give me a TLDR") structurally can't score well against retrievalTier's
     // archive-wide content-similarity gate no matter which paper is pinned, since the question
-    // text doesn't resemble any passage's *content*. When the chip names a specific paper, that
-    // is itself a deterministic, code-decided signal that real evidence exists -- stronger than
-    // a raw similarity score for exactly this class of question -- so it overrides the gate to
-    // let the LLM attempt a real, grounded answer. This does not weaken the "never trust the
-    // LLM's self-reported confidence" principle behind that gate (decisions.md, "Confidence
-    // tiering"): citation verification below still fails safe to refuse if the answer isn't
-    // actually grounded, exactly as it already does for every other confident-tier attempt.
-    const tier = currentPaper ? 'confident' : retrievalTier;
+    // text doesn't resemble any passage's *content*. When the chip names a specific paper (or,
+    // per spec-explicit-paper-number-pinning.md below, the question names one explicitly) and
+    // pinning actually succeeds in adding that paper's real content to `chunks`, that's a
+    // deterministic, code-decided signal that real evidence exists -- stronger than a raw
+    // similarity score for exactly this class of question -- so it overrides the gate to let the
+    // LLM attempt a real, grounded answer (the actual override condition, `hasGroundedPinnedPaper`,
+    // is computed further below, once the pin loop has actually run -- see its own doc comment for
+    // why detection alone isn't enough). This does not weaken the "never trust the LLM's
+    // self-reported confidence" principle behind that gate (decisions.md, "Confidence tiering"):
+    // citation verification below still fails safe to refuse if the answer isn't actually
+    // grounded, exactly as it already does for every other confident-tier attempt.
+    // Paper numbers named explicitly in the question text itself (spec-explicit-paper-number-
+    // pinning.md) -- extends the currentPaper pinning mechanism below to a second trigger, for
+    // questions like "what is paper 4 about?" that have almost no semantic similarity to that
+    // paper's actual content. The extractor call itself is wrapped so a future (non-regex)
+    // implementation's failure degrades to "no explicit references detected" rather than failing
+    // the whole question over an enhancement -- AskService depends only on the
+    // PaperReferenceExtractor interface, never on any one implementation succeeding.
+    let explicitPaperNumbers: number[] = [];
+    try {
+      explicitPaperNumbers = await this.paperReferenceExtractor.extractPaperNumbers(question);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to extract explicit paper-number references from the question: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    // MAX_EXPLICIT_PAPER_PINS caps how many of the extractor's (already validated/deduplicated)
+    // numbers get pinned -- a deliberate, documented truncation (this story's Boundaries), not an
+    // error. Enforced here regardless of extractor implementation, never inside the extractor.
+    const cappedExplicitPaperNumbers = explicitPaperNumbers.slice(0, MAX_EXPLICIT_PAPER_PINS);
+    if (explicitPaperNumbers.length > MAX_EXPLICIT_PAPER_PINS) {
+      this.logger.warn(
+        `Question referenced ${explicitPaperNumbers.length} distinct paper numbers -- ` +
+          `truncated to the first ${MAX_EXPLICIT_PAPER_PINS} (MAX_EXPLICIT_PAPER_PINS): ` +
+          `${cappedExplicitPaperNumbers.join(', ')} (dropped: ` +
+          `${explicitPaperNumbers.slice(MAX_EXPLICIT_PAPER_PINS).join(', ')})`,
+      );
+    }
 
-    // Pin the current paper's own full content as extra evidence when it didn't already make
+    // Pin each referenced paper's own full content as extra evidence when it didn't already make
     // the unrestricted top-K on its own merits (2026-09-03 follow-up to the product correction
-    // above): a vague, low-signal question ("summarize this paper", "give me a TLDR") otherwise
-    // has nothing anchoring it to the paper the user is actually reading, since retrieval no
-    // longer filters by it. Unlike retrieveRelevantChunks, getAllChunksForPaper needs no
-    // embedding/AIProvider call at all -- it's a plain lookup, so there's nothing here for a
-    // flaky LLM provider to fail. Best-effort: a failure here degrades to just the unrestricted
-    // results rather than failing the whole question over an enhancement.
-    if (
-      currentPaper &&
-      !chunks.some((chunk) => chunk.paperNumber === currentPaper.paperNumber)
-    ) {
+    // above, extended by spec-explicit-paper-number-pinning.md to explicit in-question
+    // references): a vague, low-signal question ("summarize this paper", "give me a TLDR") or a
+    // question naming a paper by number otherwise has nothing anchoring it to that paper's real
+    // content, since retrieval no longer filters by it. currentPaper's own number and the
+    // explicitly-referenced numbers are merged into one deduplicated set first -- a paper named
+    // both ways (e.g. reading paper 1, asking "more about paper 1") is only fetched once. Unlike
+    // retrieveRelevantChunks, getAllChunksForPaper needs no embedding/AIProvider call at all --
+    // it's a plain lookup, so there's nothing here for a flaky LLM provider to fail. Best-effort
+    // per paper number: a failure pinning one doesn't block the others or fail the whole question.
+    const paperNumbersToPin = new Set<number>();
+    if (currentPaper) {
+      paperNumbersToPin.add(currentPaper.paperNumber);
+    }
+    for (const paperNumber of cappedExplicitPaperNumbers) {
+      paperNumbersToPin.add(paperNumber);
+    }
+
+    for (const paperNumber of paperNumbersToPin) {
+      if (chunks.some((chunk) => chunk.paperNumber === paperNumber)) {
+        continue;
+      }
       try {
-        const pinnedChunks = await getAllChunksForPaper(
-          this.dataSource,
-          currentPaper.paperNumber,
-        );
+        const pinnedChunks = await getAllChunksForPaper(this.dataSource, paperNumber);
         chunks = [...chunks, ...pinnedChunks];
       } catch (err) {
         this.logger.warn(
-          `Failed to pin current paper ${currentPaper.paperNumber}'s chunks as extra context: ${
+          `Failed to pin paper ${paperNumber}'s chunks as extra context: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
       }
     }
+
+    // The tier is forced to 'confident' only when at least one of the pinned-for paper numbers
+    // (currentPaper's own number and/or an explicitly-referenced one) actually ends up represented
+    // in `chunks` -- either because it was already in the unrestricted top-K, or because pinning
+    // above actually added it. This is checked here, AFTER the pin loop has run, deliberately: a
+    // referenced/current paper number is only a *candidate* signal that real evidence exists,
+    // never a guarantee -- `getAllChunksForPaper` resolving to an empty array (an in-range paper
+    // number with no chunks actually in the DB, e.g. a partial-ingestion gap) is a normal
+    // *outcome*, not a thrown error, and must not be treated as "evidence found" just because a
+    // reference was detected. Forcing 'confident' on detection alone (regardless of whether
+    // pinning actually produced anything) would let the LLM answer a paper-specific question using
+    // only the unrelated top-K chunks while still reporting `confidence: 'high'` -- exactly the
+    // "confidently wrong" failure mode citation verification and tiering exist to prevent. Citation
+    // verification below still fails safe to refuse if the answer isn't actually grounded either
+    // way; this check only decides whether the LLM gets a forced attempt at all.
+    const hasGroundedPinnedPaper = [...paperNumbersToPin].some((paperNumber) =>
+      chunks.some((chunk) => chunk.paperNumber === paperNumber),
+    );
+    const tier = hasGroundedPinnedPaper ? 'confident' : retrievalTier;
 
     const outcome = await this.resolveOutcome(tier, question, chunks, currentPaper, history);
 

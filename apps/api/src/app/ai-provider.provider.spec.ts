@@ -21,11 +21,14 @@ jest.mock('@federalist-research/ai', () => ({
 }));
 
 import { createEmbeddingProvider, createGenerationProvider } from '@federalist-research/ai';
+import type { PaperReferenceExtractor } from './ask/paper-reference-extractor';
 import {
   EMBEDDING_PROVIDER,
   GENERATION_PROVIDER,
+  PAPER_REFERENCE_EXTRACTOR,
   createEmbeddingProviderProvider,
   createGenerationProviderProvider,
+  createPaperReferenceExtractorProvider,
 } from './ai-provider.provider';
 
 const mockedCreateEmbeddingProvider = createEmbeddingProvider as jest.Mock;
@@ -173,5 +176,34 @@ describe('createGenerationProviderProvider', () => {
 
     expect(mockedCreateGenerationProvider).toHaveBeenCalledTimes(1);
     expect(fakeConcreteProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+  });
+});
+
+// createPaperReferenceExtractorProvider (spec-explicit-paper-number-pinning.md) mirrors the same
+// lazy-construction wrapper shape as the two providers above, built on the real
+// createPaperReferenceExtractor() (not `@federalist-research/ai` -- nothing here needs mocking,
+// since the regex implementation has no config to fail fast on).
+describe('createPaperReferenceExtractorProvider', () => {
+  function buildLazyProvider(): PaperReferenceExtractor {
+    const provider = createPaperReferenceExtractorProvider() as {
+      provide: string;
+      useFactory: () => PaperReferenceExtractor;
+    };
+    expect(provider.provide).toBe(PAPER_REFERENCE_EXTRACTOR);
+    return provider.useFactory();
+  }
+
+  it('resolves paper numbers extracted from a question, same as the underlying regex extractor', async () => {
+    const extractor = buildLazyProvider();
+
+    await expect(extractor.extractPaperNumbers('what is paper 4 about?')).resolves.toEqual([4]);
+  });
+
+  it('resolves an empty array for a question with no paper-number reference', async () => {
+    const extractor = buildLazyProvider();
+
+    await expect(
+      extractor.extractPaperNumbers('Why did the framers want checks and balances?'),
+    ).resolves.toEqual([]);
   });
 });

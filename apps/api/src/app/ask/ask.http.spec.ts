@@ -3,10 +3,15 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken } from '@nestjs/typeorm';
 import type { EmbeddingProvider, GenerationProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
-import { EMBEDDING_PROVIDER, GENERATION_PROVIDER } from '../ai-provider.provider';
+import {
+  EMBEDDING_PROVIDER,
+  GENERATION_PROVIDER,
+  PAPER_REFERENCE_EXTRACTOR,
+} from '../ai-provider.provider';
 import { AskController } from './ask.controller';
 import { AskService } from './ask.service';
 import { CLARIFY_THRESHOLD, CONFIDENT_THRESHOLD } from './answer-thresholds';
+import type { PaperReferenceExtractor } from './paper-reference-extractor';
 
 /**
  * Real-HTTP test for `POST /api/ask`'s wiring: AskController + AskService are the real classes
@@ -43,6 +48,9 @@ describe('POST /api/ask (HTTP wiring)', () => {
     const fakeGenerationProvider: GenerationProvider = {
       generateStructuredOutput: fakeGenerateStructuredOutput,
     };
+    const fakePaperReferenceExtractor: PaperReferenceExtractor = {
+      extractPaperNumbers: jest.fn().mockResolvedValue([]),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       controllers: [AskController],
@@ -51,6 +59,7 @@ describe('POST /api/ask (HTTP wiring)', () => {
         { provide: getDataSourceToken(), useValue: fakeDataSource },
         { provide: EMBEDDING_PROVIDER, useValue: fakeEmbeddingProvider },
         { provide: GENERATION_PROVIDER, useValue: fakeGenerationProvider },
+        { provide: PAPER_REFERENCE_EXTRACTOR, useValue: fakePaperReferenceExtractor },
       ],
     }).compile();
 

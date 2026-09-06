@@ -5,6 +5,10 @@ import {
   type EmbeddingProvider,
   type GenerationProvider,
 } from '@federalist-research/ai';
+import {
+  createPaperReferenceExtractor,
+  type PaperReferenceExtractor,
+} from './ask/paper-reference-extractor';
 
 /** DI token for the `EmbeddingProvider` injected into a module's graph -- the always-Gemini half
  *  of the seam (spec-openrouter-provider.md's Spec Change Log split `AI_PROVIDER`'s one combined
@@ -17,6 +21,11 @@ export const EMBEDDING_PROVIDER = 'EMBEDDING_PROVIDER';
  *  half of the seam (`createGenerationProvider`, "gemini" or "openrouter"). Injected only by
  *  `AskModule` (Story 3.1) -- `PapersModule`'s routes never call `generateStructuredOutput`. */
 export const GENERATION_PROVIDER = 'GENERATION_PROVIDER';
+
+/** DI token for the `PaperReferenceExtractor` injected into `AskModule`'s graph
+ *  (spec-explicit-paper-number-pinning.md) -- `createPaperReferenceExtractor()`'s regex
+ *  implementation today, swappable later behind this same seam. Injected only by `AskModule`. */
+export const PAPER_REFERENCE_EXTRACTOR = 'PAPER_REFERENCE_EXTRACTOR';
 
 /**
  * Builds the `EMBEDDING_PROVIDER` factory provider shared by `PapersModule` (`generateEmbedding`,
@@ -84,6 +93,35 @@ export function createGenerationProviderProvider(): Provider {
       return {
         generateStructuredOutput: async (params) => {
           return getOrConstruct().generateStructuredOutput(params);
+        },
+      };
+    },
+  };
+}
+
+/**
+ * Builds the `PAPER_REFERENCE_EXTRACTOR` factory provider for `AskModule`
+ * (spec-explicit-paper-number-pinning.md). `createPaperReferenceExtractor()`'s regex
+ * implementation has no config to fail fast on today, but this mirrors
+ * `createEmbeddingProviderProvider`/`createGenerationProviderProvider`'s lazy-construction shape
+ * anyway -- the same DI seam, so a future (e.g. LLM-based) implementation that *does* need
+ * config/fail-fast behavior slots in with zero change to this provider's shape or `AskService`'s
+ * injection.
+ */
+export function createPaperReferenceExtractorProvider(): Provider {
+  return {
+    provide: PAPER_REFERENCE_EXTRACTOR,
+    useFactory: (): PaperReferenceExtractor => {
+      let cached: PaperReferenceExtractor | undefined;
+      function getOrConstruct(): PaperReferenceExtractor {
+        if (!cached) {
+          cached = createPaperReferenceExtractor();
+        }
+        return cached;
+      }
+      return {
+        extractPaperNumbers: async (question: string) => {
+          return getOrConstruct().extractPaperNumbers(question);
         },
       };
     },
