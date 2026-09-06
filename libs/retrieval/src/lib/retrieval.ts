@@ -1,4 +1,4 @@
-import type { AIProvider } from '@federalist-research/ai';
+import type { EmbeddingProvider } from '@federalist-research/ai';
 import { escapeLikeTerm } from '@federalist-research/database';
 import { DataSource } from 'typeorm';
 
@@ -81,7 +81,7 @@ interface RetrievalRow {
  */
 export async function retrieveRelevantChunks(
   dataSource: DataSource,
-  aiProvider: AIProvider,
+  aiProvider: EmbeddingProvider,
   query: string,
   options: RetrieveOptions = {},
 ): Promise<RetrievedChunk[]> {
@@ -153,5 +153,45 @@ export async function retrieveRelevantChunks(
     paperTitle: row.paperTitle,
     content: row.content,
     score: Number(row.score),
+  }));
+}
+
+/**
+ * Returns every `document_chunks` row for `paperNumber`, in reading order (`chunk_index`) --
+ * unranked, no `aiProvider.generateEmbedding` call, no dependency on any AI provider at all. For
+ * "pinned context" callers that already know a specific paper is relevant (e.g. the quill panel's
+ * page-aware context chip, Story 5.2) and want its full content rather than a similarity-ranked
+ * subset -- unlike `retrieveRelevantChunks`, this never needs a query to rank against, so there's
+ * nothing to embed.
+ *
+ * Every returned chunk's `score` is `1` -- there is no real similarity score to report since
+ * nothing was ranked against a query. Callers must never use it for a tier/confidence decision
+ * (see `RetrievedChunk.score`'s own doc comment for what a real, ranked score means).
+ */
+export async function getAllChunksForPaper(
+  dataSource: DataSource,
+  paperNumber: number,
+): Promise<RetrievedChunk[]> {
+  const rows = await dataSource.query<Array<Omit<RetrievalRow, 'score'>>>(
+    `
+    SELECT
+      chunk.id AS "chunkId",
+      paper.paper_number AS "paperNumber",
+      paper.title AS "paperTitle",
+      chunk.content AS "content"
+    FROM document_chunks chunk
+    INNER JOIN federalist_papers paper ON paper.id = chunk.paper_id
+    WHERE paper.paper_number = $1
+    ORDER BY chunk.chunk_index
+    `,
+    [paperNumber],
+  );
+
+  return rows.map((row) => ({
+    chunkId: row.chunkId,
+    paperNumber: row.paperNumber,
+    paperTitle: row.paperTitle,
+    content: row.content,
+    score: 1,
   }));
 }

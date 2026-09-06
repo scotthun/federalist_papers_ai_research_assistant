@@ -1,4 +1,4 @@
-import type { AIProvider } from '@federalist-research/ai';
+import type { EmbeddingProvider } from '@federalist-research/ai';
 import {
   Author,
   FederalistPaper,
@@ -16,7 +16,7 @@ import { retrieveRelevantChunks } from './retrieval';
  * actually exercises this.
  *
  * The embedding model is never called for real here -- every "query" below is a plain string key
- * into a hand-crafted, deterministic 3072-dim vector via a fake `AIProvider`
+ * into a hand-crafted, deterministic 3072-dim vector via a fake `EmbeddingProvider`
  * (`fakeAiProviderFor`), matching this story's Boundaries ("automated tests... use real
  * Postgres+pgvector with hand-crafted, deterministic embedding vectors -- not real Gemini calls").
  * Only `eval-retrieval.ts` calls the real embedding model.
@@ -53,7 +53,7 @@ function blendVector(indexA: number, indexB: number): number[] {
   return v;
 }
 
-function fakeAiProviderFor(queryToEmbedding: Record<string, number[]>): AIProvider {
+function fakeAiProviderFor(queryToEmbedding: Record<string, number[]>): EmbeddingProvider {
   return {
     generateEmbedding: async (text: string) => {
       const embedding = queryToEmbedding[text];
@@ -61,9 +61,6 @@ function fakeAiProviderFor(queryToEmbedding: Record<string, number[]>): AIProvid
         throw new Error(`No fixture embedding registered for query "${text}"`);
       }
       return embedding;
-    },
-    generateStructuredOutput: async () => {
-      throw new Error('generateStructuredOutput is not used by retrieveRelevantChunks');
     },
   };
 }

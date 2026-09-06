@@ -13,7 +13,7 @@
  * fakes, rather than only being exercised by a real end-to-end run.
  */
 import { Logger } from '@nestjs/common';
-import { createAIProvider, type AIProvider } from '@federalist-research/ai';
+import { createEmbeddingProvider, type EmbeddingProvider } from '@federalist-research/ai';
 import {
   createDataSource,
   upsertPaperWithChunks,
@@ -150,7 +150,7 @@ export interface IngestPaperResult {
 export async function ingestPaper(
   paperNumber: number,
   dataSource: DataSource,
-  aiProvider: AIProvider,
+  aiProvider: EmbeddingProvider,
   chunkOptions: ChunkOptions,
   embedDelayMs: number,
 ): Promise<IngestPaperResult> {
@@ -280,9 +280,10 @@ function paperNumberRange(first: number, last: number): number[] {
 async function main(): Promise<void> {
   const config = loadIngestConfig();
   const { DATABASE_URL } = validateEnv();
-  // Constructed before the loop: a missing/invalid AI_PROVIDER config is a systemic problem,
-  // not a per-paper one -- fail fast rather than attempting (and failing) 85 times.
-  const aiProvider = createAIProvider();
+  // Constructed before the loop: a missing GEMINI_API_KEY (embeddings always use Gemini,
+  // regardless of AI_PROVIDER) is a systemic problem, not a per-paper one -- fail fast rather than
+  // attempting (and failing) 85 times.
+  const aiProvider = createEmbeddingProvider();
 
   const dataSource = createDataSource(DATABASE_URL);
   await dataSource.initialize();

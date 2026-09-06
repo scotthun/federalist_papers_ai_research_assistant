@@ -415,7 +415,7 @@ So that I can get grounded answers without leaving whatever page I'm on.
 ### Story 5.2: Chat Persistence & Page-Aware Context
 
 As a user having a research session across multiple pages,
-I want my chat history to stay visible as I navigate, and have the widget automatically know which paper I'm reading (with the option to remove that scoping),
+I want my chat history to stay visible as I navigate, and have the widget automatically know which paper I'm reading (with the option to remove that context),
 So that I don't lose my conversation or have to repeat context when asking a follow-up.
 
 **Acceptance Criteria:**
@@ -434,11 +434,11 @@ So that I don't lose my conversation or have to repeat context when asking a fol
 
 **Given** the context chip is present
 **When** the user submits a question
-**Then** the ask request includes that paper's `paperNumber` as a retrieval filter, reusing the existing CAP-2/NFR6 filter-before-limit mechanism — not a new filtering path
+**Then** the ask request tells the LLM the user is currently reading that paper (number + title) as contextual framing only — retrieval still searches the whole archive; the current paper is never applied as a hard filter, so a question best answered by a different paper can still be (product correction, 2026-09-02: the original AC specified a `paperNumber` retrieval filter here — reusing the CAP-2/NFR6 filter-before-limit mechanism was the actual mechanism used before this correction — but that restricted answers to a single paper, which wasn't the intended user goal; "extra context, not a scope lock" is)
 
 **Given** the context chip is present
 **When** the user clicks its `✕`
-**Then** the chip is removed, the next question searches the whole archive with no `paperNumber` filter, and the chip does not reappear while the user remains on that same Paper Reader page — this scoping is per-paper, not a one-time flag for the whole conversation
+**Then** the chip is removed, the next question no longer tells the LLM which paper the user is reading, and the chip does not reappear while the user remains on that same Paper Reader page — this is per-paper, not a one-time flag for the whole conversation
 
 **Given** the chip was removed while reading Paper N
 **When** the user navigates (e.g. via a citation or related-paper click) to a different Paper Reader, Paper M

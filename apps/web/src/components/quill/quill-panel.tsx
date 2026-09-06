@@ -14,12 +14,18 @@ import {
   type AskStreamEvent,
 } from '@/lib/ask-stream';
 import { cn } from '@/lib/utils';
-import type { QuillMessage } from './quill-widget';
+import { CHAT_HISTORY_SESSION_KEY, type QuillMessage } from './quill-widget';
 
 type PanelProps = {
   messages: QuillMessage[];
   setMessages: Dispatch<SetStateAction<QuillMessage[]>>;
   onCollapse: () => void;
+  /** Non-null only when the panel was opened while a Paper Reader page announced itself as
+   *  current (Story 5.2) -- drives both the removable context chip and the `paperNumber`
+   *  retrieval filter sent with the next ask request. `null` means "search the whole archive"
+   *  (Homepage/Browse Papers, or the chip was dismissed). */
+  paperContext: { paperNumber: number; title: string } | null;
+  onDismissPaperContext: () => void;
 };
 
 let messageIdCounter = 0;
@@ -80,13 +86,55 @@ function markConnectionLost(
 }
 
 /**
+ * Builds the `history` array sent with the next `/api/ask` call (spec-conversation-history-
+ * context.md): every prior `role: 'question'` turn immediately followed by a `role: 'answer'`
+ * turn whose `status` is `'done'` AND whose `insufficientEvidence` is `false`, oldest first.
+ * Messages are always appended in question-then-answer pairs (`handleSubmit` below), so a simple
+ * adjacent-pair scan is sufficient -- no need to track ids separately. A `streaming`/
+ * `connection-lost` answer's pair is skipped entirely (its text may be incomplete or absent and
+ * must never be sent as if it were a finished turn) -- the conversation just resumes from
+ * whatever earlier qualifying turns exist, or sends none at all if there aren't any yet.
+ *
+ * `insufficientEvidence: true` (refuse tier, clarify tier, and -- critically -- the fail-safe-to-
+ * refuse outcome used for `CONTEXT_LENGTH_EXCEEDED_MESSAGE` and every other provider-failure
+ * message) is likewise excluded even though `status` is `'done'`: none of those are a genuine,
+ * evidence-grounded answer, so feeding them back as if they were would be actively harmful --
+ * most importantly for the context-length case, where re-sending the very refusal that said "this
+ * conversation has grown too long" would only grow the next request further and reproduce the
+ * same failure, defeating the point of that safety message entirely (bug found in review,
+ * 2026-09-05). Only a genuine confident-tier answer should ever populate history.
+ */
+function buildHistory(messages: QuillMessage[]): Array<{ question: string; answer: string }> {
+  const turns: Array<{ question: string; answer: string }> = [];
+  for (let i = 0; i < messages.length - 1; i += 1) {
+    const question = messages[i];
+    const answer = messages[i + 1];
+    if (
+      question.role === 'question' &&
+      answer.role === 'answer' &&
+      answer.status === 'done' &&
+      !answer.insufficientEvidence
+    ) {
+      turns.push({ question: question.text, answer: answer.text });
+    }
+  }
+  return turns;
+}
+
+/**
  * The open quill panel (DESIGN.md's "Chat panel"): dog-eared chrome, header band, question input
  * (focused on open), the message list, and the streaming fetch of `/api/ask`. `messages` state is
  * owned by `quill-widget.tsx` (lifted so it survives this component unmounting on collapse) --
  * this component only owns its own input value and in-flight send status, both of which are fine
  * to reset every time the panel reopens.
  */
-export function QuillPanel({ messages, setMessages, onCollapse }: PanelProps) {
+export function QuillPanel({
+  messages,
+  setMessages,
+  onCollapse,
+  paperContext,
+  onDismissPaperContext,
+}: PanelProps) {
   const [question, setQuestion] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   // Deliberately *not* local state: this component unmounts on collapse (quill-widget.tsx), and
@@ -134,6 +182,11 @@ export function QuillPanel({ messages, setMessages, onCollapse }: PanelProps) {
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
+    // Built from `messages` as it stands *before* this turn's own question/answer are appended
+    // below -- exactly "all prior done-status question/answer pairs" (this story's Code Map),
+    // never including the in-flight turn itself.
+    const history = buildHistory(messages);
+
     const answerId = nextMessageId('answer');
     setMessages((prev) => [
       ...prev,
@@ -154,7 +207,20 @@ export function QuillPanel({ messages, setMessages, onCollapse }: PanelProps) {
       const response = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: trimmedQuestion }),
+        // paperContext (if present) is the same boolean/value that drove the chip's visibility
+        // when this question was submitted (Story 5.2's Boundaries) -- included only when
+        // non-null, so a dismissed/absent context never sends a stray paperNumber/paperTitle.
+        // apps/api threads this into the LLM's prompt as framing only (product-corrected
+        // 2026-09-02) -- it is never applied as a retrieval filter. `history` (spec-conversation-
+        // history-context.md) is included only when non-empty, so a first question's request
+        // body is byte-for-byte unchanged from before this story.
+        body: JSON.stringify({
+          question: trimmedQuestion,
+          ...(paperContext
+            ? { paperNumber: paperContext.paperNumber, paperTitle: paperContext.title }
+            : {}),
+          ...(history.length > 0 ? { history } : {}),
+        }),
         signal: abortController.signal,
       });
 
@@ -208,6 +274,27 @@ export function QuillPanel({ messages, setMessages, onCollapse }: PanelProps) {
     }
   }
 
+  /**
+   * Resets both the in-memory conversation and its `sessionStorage` persistence in one action
+   * (spec-conversation-history-context.md's first safety addition) -- never one without the
+   * other, since a UI reset that left stale data in `sessionStorage` would silently reappear on
+   * the next reload. Works correctly even mid-stream: aborting the in-flight request first means
+   * no late token/done event can resurrect anything (its `answerId` no longer matches any message
+   * once `messages` is cleared), and clearing `messages` here also makes `quill-widget.tsx`'s own
+   * write-through effect persist the now-empty conversation -- the explicit `removeItem` below is
+   * belt-and-suspenders against that effect's async timing, not the only thing doing the reset.
+   */
+  function handleClearChat() {
+    abortControllerRef.current?.abort();
+    setMessages([]);
+    try {
+      window.sessionStorage.removeItem(CHAT_HISTORY_SESSION_KEY);
+    } catch {
+      // Storage inaccessible (e.g. Safari private mode) -- messages state is still cleared, which
+      // is the part the user actually sees; nothing further to do.
+    }
+  }
+
   return (
     <div
       className={cn(
@@ -224,17 +311,43 @@ export function QuillPanel({ messages, setMessages, onCollapse }: PanelProps) {
     >
       <header className="flex items-center justify-between bg-quill-inverse-surface px-4 py-3 text-quill-inverse-on-surface">
         <h2 className="text-base">🪶 Ask the Archive</h2>
-        <button
-          type="button"
-          onClick={onCollapse}
-          aria-label="Collapse Ask the Archive panel"
-          className="flex h-11 w-11 items-center justify-center rounded-full text-lg hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold"
-        >
-          ✕
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={handleClearChat}
+            aria-label="Clear chat"
+            className="rounded-full px-2 py-1 text-xs hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold"
+          >
+            Clear chat
+          </button>
+          <button
+            type="button"
+            onClick={onCollapse}
+            aria-label="Collapse Ask the Archive panel"
+            className="flex h-11 w-11 items-center justify-center rounded-full text-lg hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold"
+          >
+            ✕
+          </button>
+        </div>
       </header>
 
       <div className="flex-1 space-y-3 overflow-y-auto p-3">
+        {paperContext && (
+          <div className="flex justify-start">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-quill-accent-gold bg-quill-surface-chip px-3 py-1 text-xs text-quill-ink-secondary">
+              <span aria-hidden="true">📄</span> Federalist No. {paperContext.paperNumber} —{' '}
+              {paperContext.title}
+              <button
+                type="button"
+                onClick={onDismissPaperContext}
+                aria-label="Remove paper context"
+                className="ml-0.5 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold"
+              >
+                ✕
+              </button>
+            </span>
+          </div>
+        )}
         {messages.length === 0 && (
           <p className="text-sm text-quill-ink-muted">
             Ask a question about the Federalist Papers.

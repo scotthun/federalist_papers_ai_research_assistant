@@ -1,89 +1,50 @@
-const embedQuery = jest.fn();
 const invoke = jest.fn();
 const withStructuredOutput = jest.fn(() => ({ invoke }));
 
-jest.mock('@langchain/google-genai', () => ({
-  ChatGoogleGenerativeAI: jest.fn().mockImplementation(() => ({
+jest.mock('@langchain/openai', () => ({
+  ChatOpenAI: jest.fn().mockImplementation(() => ({
     withStructuredOutput,
-  })),
-  GoogleGenerativeAIEmbeddings: jest.fn().mockImplementation(() => ({
-    embedQuery,
   })),
 }));
 
 // Imported after the mock so the class under test picks up the mocked SDK.
-import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
+import { ChatOpenAI } from '@langchain/openai';
 import { z } from 'zod';
 import { ProviderUnavailableError } from '../ai-provider.interface';
-import { GeminiProvider } from './gemini.provider';
+import { OpenRouterProvider } from './openrouter.provider';
 
-describe('GeminiProvider', () => {
+describe('OpenRouterProvider', () => {
   beforeEach(() => {
-    embedQuery.mockReset();
     invoke.mockReset();
     withStructuredOutput.mockClear();
-    jest.mocked(ChatGoogleGenerativeAI).mockClear();
-    jest.mocked(GoogleGenerativeAIEmbeddings).mockClear();
+    jest.mocked(ChatOpenAI).mockClear();
   });
 
   it('throws if constructed without an API key', () => {
-    expect(() => new GeminiProvider({ apiKey: '' })).toThrow(/apiKey/);
+    expect(() => new OpenRouterProvider({ apiKey: '' })).toThrow(/apiKey/);
   });
 
-  it('constructs the underlying chat model and embeddings client with the given API key', () => {
-    new GeminiProvider({ apiKey: 'test-key' });
+  it('constructs the underlying chat model with the given API key, OpenRouter baseURL, the default model, and maxRetries: 0', () => {
+    new OpenRouterProvider({ apiKey: 'test-key' });
 
     // maxRetries: 0 is pinned here too -- @langchain/core's AsyncCaller otherwise defaults to 6
     // silent internal retries, which would violate "never retries internally" at runtime even
-    // though the mocks below can't themselves exercise that retry machinery.
-    expect(jest.mocked(ChatGoogleGenerativeAI)).toHaveBeenCalledWith({
-      model: 'gemini-3.6-flash',
+    // though the mocks below can't themselves exercise that retry machinery (mirrors
+    // gemini.provider.spec.ts's identical assertion for GeminiProvider).
+    expect(jest.mocked(ChatOpenAI)).toHaveBeenCalledWith({
+      model: 'nvidia/nemotron-3-super-120b-a12b:free',
       apiKey: 'test-key',
-      maxRetries: 0,
-    });
-    expect(jest.mocked(GoogleGenerativeAIEmbeddings)).toHaveBeenCalledWith({
-      model: 'gemini-embedding-001',
-      apiKey: 'test-key',
+      configuration: { baseURL: 'https://openrouter.ai/api/v1' },
       maxRetries: 0,
     });
   });
 
-  const validEmbedding = Array.from({ length: 3072 }, (_, i) => i / 3072);
+  it('overrides the default model when one is passed', () => {
+    new OpenRouterProvider({ apiKey: 'test-key', model: 'some/other:free' });
 
-  it('calls embedQuery with the gemini-embedding-001 model and returns the embedding values', async () => {
-    embedQuery.mockResolvedValue(validEmbedding);
-    const provider = new GeminiProvider({ apiKey: 'test-key' });
-
-    const result = await provider.generateEmbedding('some text');
-
-    expect(embedQuery).toHaveBeenCalledWith('some text');
-    expect(result).toEqual(validEmbedding);
-  });
-
-  it('throws a clear error if Gemini returns no embedding values', async () => {
-    embedQuery.mockResolvedValue([]);
-    const provider = new GeminiProvider({ apiKey: 'test-key' });
-
-    await expect(provider.generateEmbedding('some text')).rejects.toThrow(
-      /no embedding values/,
+    expect(jest.mocked(ChatOpenAI)).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'some/other:free' }),
     );
-  });
-
-  it('throws a clear error naming both dimensions if Gemini returns the wrong embedding size', async () => {
-    embedQuery.mockResolvedValue([0.1, 0.2, 0.3]);
-    const provider = new GeminiProvider({ apiKey: 'test-key' });
-
-    await expect(provider.generateEmbedding('some text')).rejects.toThrow(
-      /3 dimensions, expected 3072/,
-    );
-  });
-
-  it('propagates a rejection from the underlying embedQuery call as-is', async () => {
-    const networkError = new Error('network error: ECONNRESET');
-    embedQuery.mockRejectedValue(networkError);
-    const provider = new GeminiProvider({ apiKey: 'test-key' });
-
-    await expect(provider.generateEmbedding('some text')).rejects.toBe(networkError);
   });
 
   describe('generateStructuredOutput', () => {
@@ -94,7 +55,7 @@ describe('GeminiProvider', () => {
 
     it('builds a structured-output runnable from the passed Zod schema and invokes it with a system/human message pair', async () => {
       invoke.mockResolvedValue({ answer: 'Grounded answer.', citations: [{ chunkId: 'c1' }] });
-      const provider = new GeminiProvider({ apiKey: 'test-key' });
+      const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
       await provider.generateStructuredOutput({
         systemInstruction: 'Answer only from the evidence.',
@@ -104,7 +65,8 @@ describe('GeminiProvider', () => {
 
       // Pins that the schema handed to LangChain is the caller's own Zod schema, not some
       // internal reshaping of it -- matching this method's "the real contract is the Zod
-      // validation, not the SDK's own schema hinting" guarantee.
+      // validation, not the SDK's own schema hinting" guarantee (mirrors GeminiProvider's
+      // identical test).
       expect(withStructuredOutput).toHaveBeenCalledTimes(1);
       expect(withStructuredOutput).toHaveBeenCalledWith(outputSchema);
       expect(invoke).toHaveBeenCalledTimes(1);
@@ -116,7 +78,7 @@ describe('GeminiProvider', () => {
 
     it('returns the parsed-and-validated JSON on a schema-valid response', async () => {
       invoke.mockResolvedValue({ answer: 'Grounded answer.', citations: [{ chunkId: 'c1' }] });
-      const provider = new GeminiProvider({ apiKey: 'test-key' });
+      const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
       const result = await provider.generateStructuredOutput({
         systemInstruction: 'sys',
@@ -129,11 +91,10 @@ describe('GeminiProvider', () => {
 
     // This is the load-bearing case: even though LangChain does its own schema-hinted parsing
     // internally, the response is always re-validated against the real Zod schema afterward --
-    // never trusted just because the Runnable resolved (this story's Boundaries: "always
-    // re-validated ... regardless of what schema hinting the underlying SDK supports").
+    // never trusted just because the Runnable resolved (mirrors GeminiProvider's identical test).
     it('throws a clear error if the resolved value does not satisfy the Zod schema, making exactly one call', async () => {
       invoke.mockResolvedValue({ answer: 'Missing citations field entirely.' });
-      const provider = new GeminiProvider({ apiKey: 'test-key' });
+      const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
       await expect(
         provider.generateStructuredOutput({
@@ -142,21 +103,13 @@ describe('GeminiProvider', () => {
           schema: outputSchema,
         }),
       ).rejects.toThrow(/failed schema validation/);
-      // Matrix's "exactly one call made" guarantee for this scenario specifically -- distinct
-      // from the invoke-rejects scenario below, which is a separate row in the matrix.
       expect(invoke).toHaveBeenCalledTimes(1);
     });
 
-    // Distinct from the schema-validation-failure case above, which covers the Runnable
-    // *resolving* with an unusable value -- this covers the underlying call itself *rejecting*
-    // (e.g. a network error, or LangChain's own parser finding no usable tool call). Wrapped in
-    // ProviderUnavailableError (not re-thrown as-is) so callers can distinguish "the provider was
-    // never reached" from "the provider responded with something unusable" (2026-09-03,
-    // ask.service.ts's honest "model unavailable" vs "insufficient evidence" messaging).
     it('wraps a rejection from the underlying invoke call in ProviderUnavailableError, preserving the message and original error as cause', async () => {
       const networkError = new Error('network error: ECONNRESET');
       invoke.mockRejectedValue(networkError);
-      const provider = new GeminiProvider({ apiKey: 'test-key' });
+      const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
       const promise = provider.generateStructuredOutput({
         systemInstruction: 'sys',
@@ -174,22 +127,25 @@ describe('GeminiProvider', () => {
       });
     });
 
-    // 2026-09-03 second follow-up: classify by the real @google/generative-ai
-    // GoogleGenerativeAIFetchError shape (.status/.errorDetails), which LangChain's own
-    // completionWithRetry rethrows verbatim (confirmed by reading its source) -- so callers can
-    // tell a daily quota apart from a transient overload instead of one generic bucket.
+    // Classifies by the openai SDK's APIError shape (.status/.error/.headers), which
+    // @langchain/openai re-throws verbatim (confirmed by reading its dependency openai's own
+    // core/error.ts: APIError.generate builds one of these subclasses straight from the HTTP
+    // response). This story's Boundaries: OpenRouter's free-tier rate limits are account-level,
+    // not per-model -- a 429 whose body indicates the daily cap classifies as
+    // 'rate_limited_daily', a plain per-minute 429 as 'rate_limited_short'.
     describe('error classification (ProviderFailureKind)', () => {
-      function fetchError(
+      function apiError(
         status: number,
-        errorDetails?: Array<{ '@type'?: string; [key: string]: unknown }>,
+        error?: { message?: string; code?: string | number },
+        headers?: { get(name: string): string | null },
       ) {
-        const err = new Error(`Error fetching from https://example.test: [${status}] boom`);
-        return Object.assign(err, { status, errorDetails });
+        const err = new Error(`${status} boom`);
+        return Object.assign(err, { status, error, headers });
       }
 
       it('classifies 503 as overloaded', async () => {
-        invoke.mockRejectedValue(fetchError(503));
-        const provider = new GeminiProvider({ apiKey: 'test-key' });
+        invoke.mockRejectedValue(apiError(503));
+        const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
         const promise = provider.generateStructuredOutput({
           systemInstruction: 'sys',
@@ -202,18 +158,11 @@ describe('GeminiProvider', () => {
         });
       });
 
-      it('classifies a 429 with a per-day QuotaFailure detail as rate_limited_daily', async () => {
+      it('classifies a 429 whose error message names the daily/free-tier cap as rate_limited_daily', async () => {
         invoke.mockRejectedValue(
-          fetchError(429, [
-            {
-              '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
-              violations: [
-                { quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' },
-              ],
-            },
-          ]),
+          apiError(429, { message: 'Rate limit exceeded: free-tier daily limit reached' }),
         );
-        const provider = new GeminiProvider({ apiKey: 'test-key' });
+        const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
         const promise = provider.generateStructuredOutput({
           systemInstruction: 'sys',
@@ -226,17 +175,15 @@ describe('GeminiProvider', () => {
         });
       });
 
-      it('classifies a 429 without a per-day quota detail as rate_limited_short, parsing the RetryInfo delay', async () => {
+      it('classifies a 429 without a daily-cap indication as rate_limited_short, parsing a Retry-After header', async () => {
         invoke.mockRejectedValue(
-          fetchError(429, [
-            {
-              '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
-              violations: [{ quotaId: 'GenerateRequestsPerMinutePerProject-FreeTier' }],
-            },
-            { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '18s' },
-          ]),
+          apiError(
+            429,
+            { message: 'Rate limit exceeded: 20 requests per minute' },
+            { get: (name: string) => (name === 'retry-after' ? '18' : null) },
+          ),
         );
-        const provider = new GeminiProvider({ apiKey: 'test-key' });
+        const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
         const promise = provider.generateStructuredOutput({
           systemInstruction: 'sys',
@@ -250,9 +197,9 @@ describe('GeminiProvider', () => {
         });
       });
 
-      it('classifies a 429 with no error details at all as rate_limited_short with no retry hint', async () => {
-        invoke.mockRejectedValue(fetchError(429));
-        const provider = new GeminiProvider({ apiKey: 'test-key' });
+      it('classifies a 429 with no error body/headers at all as rate_limited_short with no retry hint', async () => {
+        invoke.mockRejectedValue(apiError(429));
+        const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
         const promise = provider.generateStructuredOutput({
           systemInstruction: 'sys',
@@ -267,8 +214,8 @@ describe('GeminiProvider', () => {
       });
 
       it('classifies other 5xx statuses as server_error', async () => {
-        invoke.mockRejectedValue(fetchError(500));
-        const provider = new GeminiProvider({ apiKey: 'test-key' });
+        invoke.mockRejectedValue(apiError(500));
+        const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
         const promise = provider.generateStructuredOutput({
           systemInstruction: 'sys',
@@ -282,8 +229,8 @@ describe('GeminiProvider', () => {
       });
 
       it('classifies 4xx statuses other than 429 (e.g. 401) as client_error', async () => {
-        invoke.mockRejectedValue(fetchError(401));
-        const provider = new GeminiProvider({ apiKey: 'test-key' });
+        invoke.mockRejectedValue(apiError(401));
+        const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
         const promise = provider.generateStructuredOutput({
           systemInstruction: 'sys',
@@ -297,23 +244,15 @@ describe('GeminiProvider', () => {
       });
 
       // spec-conversation-history-context.md: a too-long conversation (question + evidence +
-      // full history) rejected by the model gets its own honest kind -- Gemini returns a plain
-      // 400 for this with no dedicated status/error-detail shape, so it's detected by matching
-      // the error message's wording rather than any structured field.
+      // full history) rejected by the model gets its own honest kind. OpenRouter's OpenAI-
+      // compatible error body has no dedicated status/field for this any more than Gemini's does,
+      // so it's detected by matching the error body's message wording.
       describe('context_length_exceeded (spec-conversation-history-context.md)', () => {
-        function fetchErrorWithMessage(status: number, message: string) {
-          const err = new Error(message);
-          return Object.assign(err, { status });
-        }
-
-        it('classifies a 400 whose message mentions context length as context_length_exceeded, not client_error', async () => {
+        it('classifies a 400 whose error message mentions context length as context_length_exceeded, not client_error', async () => {
           invoke.mockRejectedValue(
-            fetchErrorWithMessage(
-              400,
-              '[400] The input token count exceeds the maximum context length allowed.',
-            ),
+            apiError(400, { message: 'This model\'s maximum context length is 8192 tokens.' }),
           );
-          const provider = new GeminiProvider({ apiKey: 'test-key' });
+          const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
           const promise = provider.generateStructuredOutput({
             systemInstruction: 'sys',
@@ -328,8 +267,8 @@ describe('GeminiProvider', () => {
         });
 
         it('still classifies an ordinary 400 with no context-length wording as client_error', async () => {
-          invoke.mockRejectedValue(fetchErrorWithMessage(400, '[400] invalid request'));
-          const provider = new GeminiProvider({ apiKey: 'test-key' });
+          invoke.mockRejectedValue(apiError(400, { message: 'invalid request body' }));
+          const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
           const promise = provider.generateStructuredOutput({
             systemInstruction: 'sys',
@@ -346,7 +285,7 @@ describe('GeminiProvider', () => {
 
     it('never retries internally -- exactly one invoke call per invocation', async () => {
       invoke.mockRejectedValue(new Error('unusable response'));
-      const provider = new GeminiProvider({ apiKey: 'test-key' });
+      const provider = new OpenRouterProvider({ apiKey: 'test-key' });
 
       await expect(
         provider.generateStructuredOutput({

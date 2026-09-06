@@ -1,9 +1,9 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getDataSourceToken } from '@nestjs/typeorm';
-import type { AIProvider } from '@federalist-research/ai';
+import type { EmbeddingProvider } from '@federalist-research/ai';
 import { DataSource } from 'typeorm';
-import { AI_PROVIDER } from '../ai-provider.provider';
+import { EMBEDDING_PROVIDER } from '../ai-provider.provider';
 import { PapersController } from './papers.controller';
 import { PapersService } from './papers.service';
 
@@ -80,9 +80,8 @@ describe('GET /api/papers (HTTP wiring)', () => {
       }),
       query: fakeDbQuery,
     } as unknown as DataSource;
-    const fakeAiProvider: AIProvider = {
+    const fakeAiProvider: EmbeddingProvider = {
       generateEmbedding: fakeGenerateEmbedding,
-      generateStructuredOutput: jest.fn(),
     };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
@@ -90,7 +89,7 @@ describe('GET /api/papers (HTTP wiring)', () => {
       providers: [
         PapersService,
         { provide: getDataSourceToken(), useValue: fakeDataSource },
-        { provide: AI_PROVIDER, useValue: fakeAiProvider },
+        { provide: EMBEDDING_PROVIDER, useValue: fakeAiProvider },
       ],
     }).compile();
 

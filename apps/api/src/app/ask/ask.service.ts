@@ -1,8 +1,14 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import type { AIProvider } from '@federalist-research/ai';
+import {
+  ProviderUnavailableError,
+  type EmbeddingProvider,
+  type GenerationProvider,
+  type ProviderFailureKind,
+} from '@federalist-research/ai';
 import {
   DEFAULT_TOP_K,
+  getAllChunksForPaper,
   retrieveRelevantChunks,
   type RetrievedChunk,
 } from '@federalist-research/retrieval';
@@ -12,13 +18,21 @@ import {
   type Citation,
 } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
-import { AI_PROVIDER } from '../ai-provider.provider';
+import {
+  EMBEDDING_PROVIDER,
+  GENERATION_PROVIDER,
+  PAPER_REFERENCE_EXTRACTOR,
+} from '../ai-provider.provider';
+import type { PaperReferenceExtractor } from './paper-reference-extractor';
 import {
   ANSWER_SYSTEM_INSTRUCTION,
   buildAnswerPrompt,
   buildEmptyCitationsCorrection,
   buildInvalidCitationCorrection,
   buildInvalidOutputCorrection,
+  buildRetrievalQuery,
+  type ConversationTurn,
+  type CurrentPaper,
 } from './answer-prompt';
 import { decideAnswerTier, type AnswerTier } from './answer-thresholds';
 import { verifyCitations } from './verify-citations';
@@ -30,8 +44,112 @@ import { verifyCitations } from './verify-citations';
  *  option. */
 const TOP_K = DEFAULT_TOP_K;
 
+/** Caps how many distinct paper numbers explicitly named in a question get pinned as extra
+ *  evidence (spec-explicit-paper-number-pinning.md) -- prevents a question like "summarize papers
+ *  1 through 85" from pinning the entire corpus into one prompt and guaranteeing a
+ *  `context_length_exceeded` refusal (spec-conversation-history-context.md) on every such
+ *  question. Enforced here in `AskService`, applied to whatever `PaperReferenceExtractor` returns
+ *  regardless of implementation -- not the extractor's own responsibility. */
+export const MAX_EXPLICIT_PAPER_PINS = 5;
+
 export const REFUSE_MESSAGE =
   "I couldn't find sufficient evidence in the Federalist Papers to answer that confidently.";
+
+/** Used instead of `REFUSE_MESSAGE` when the fail-safe-to-refuse outcome was caused by the AI
+ *  provider itself failing on both the first attempt and the one retry -- never for a citation-
+ *  verification failure or malformed response the provider *did* return. `REFUSE_MESSAGE`'s
+ *  wording ("I couldn't find sufficient evidence") is misleading for any of these causes: it
+ *  implies a content/evidence problem when the real cause is that the model was never actually
+ *  reached, or rejected the request outright.
+ *
+ * 2026-09-03 second follow-up: a single generic message here used to cover every provider
+ * failure alike, but a 429 daily-quota exhaustion and a 503 overload are not the same problem --
+ * "try again in a moment" is actively wrong for a quota that won't reset for hours. One message
+ * per `ProviderFailureKind` instead, keyed by `messageForFailureKind` below. */
+export const PROVIDER_UNAVAILABLE_MESSAGE =
+  "The AI model is temporarily unavailable (it's experiencing high demand right now) -- please try asking again in a moment.";
+
+const RATE_LIMITED_DAILY_MESSAGE =
+  "This AI model has hit its free-tier daily request limit. It won't recover until the quota resets (typically within 24 hours) -- retrying now won't help; please try again later.";
+
+function rateLimitedShortMessage(retryAfterSeconds?: number): string {
+  const wait =
+    retryAfterSeconds !== undefined ? `about ${retryAfterSeconds}s` : 'a few seconds';
+  return `The AI model is being rate-limited right now -- please wait ${wait} and try asking again.`;
+}
+
+const SERVER_ERROR_MESSAGE =
+  'The AI provider hit an internal error on its own end (not related to your question) -- please try asking again shortly.';
+
+const CLIENT_ERROR_MESSAGE =
+  "There's a configuration problem with the AI provider connection (not something your question caused) -- this needs a developer to look at, not a retry.";
+
+/** Used instead of the generic `CLIENT_ERROR_MESSAGE` when the provider rejected the call because
+ *  the request -- question + evidence + conversation history -- exceeded the model's context
+ *  window (spec-conversation-history-context.md's second safety addition). Unlike every other
+ *  `client_error`/`server_error`/etc. message, this failure genuinely *is* something the user's
+ *  own session caused (an unusually long conversation), so it must never repeat
+ *  `CLIENT_ERROR_MESSAGE`'s "not something your question caused" wording -- and it points at the
+ *  concrete fix (the "Clear chat" control) rather than telling the user to wait or a developer to
+ *  investigate. */
+export const CONTEXT_LENGTH_EXCEEDED_MESSAGE =
+  "This conversation has grown too long for the AI model to process in one request -- " +
+  'please use "Clear chat" to start a new conversation and try asking again.';
+
+/** Picks the actual answer text for a fail-safe-to-refuse outcome. `kind`/`retryAfterSeconds`
+ *  are `undefined` for the original "the provider returned a response but citation verification
+ *  rejected it" case, which still gets the unchanged `REFUSE_MESSAGE` -- never any of the
+ *  provider-failure wording below. */
+function messageForFailureKind(kind?: ProviderFailureKind, retryAfterSeconds?: number): string {
+  switch (kind) {
+    case 'rate_limited_daily':
+      return RATE_LIMITED_DAILY_MESSAGE;
+    case 'rate_limited_short':
+      return rateLimitedShortMessage(retryAfterSeconds);
+    case 'server_error':
+      return SERVER_ERROR_MESSAGE;
+    case 'client_error':
+      return CLIENT_ERROR_MESSAGE;
+    case 'overloaded':
+    case 'unavailable':
+      return PROVIDER_UNAVAILABLE_MESSAGE;
+    case 'context_length_exceeded':
+      return CONTEXT_LENGTH_EXCEEDED_MESSAGE;
+    case undefined:
+      return REFUSE_MESSAGE;
+  }
+}
+
+/** Priority order (most to least specific/actionable) for picking one `ProviderFailureKind` when
+ *  the first attempt and the retry failed with *different* kinds -- e.g. the first hit a daily
+ *  quota and the retry (pointlessly) hit it again framed differently, or one was a transient 503
+ *  and the other a genuine config error. Telling the user about the more specific/blocking cause
+ *  is always at least as true and more useful than the vaguer one.
+ *
+ *  `context_length_exceeded` ranks first: unlike every other kind here, it names a cause the
+ *  user's own session created (an unusually long conversation) with a concrete, user-actionable
+ *  fix ("Clear chat") -- strictly more specific and more useful to surface than any transient
+ *  provider-side failure the other attempt might have hit instead. */
+const FAILURE_KIND_PRIORITY: ProviderFailureKind[] = [
+  'context_length_exceeded',
+  'rate_limited_daily',
+  'client_error',
+  'rate_limited_short',
+  'server_error',
+  'overloaded',
+  'unavailable',
+];
+
+function pickMoreSpecificFailureKind(
+  a?: ProviderFailureKind,
+  b?: ProviderFailureKind,
+): ProviderFailureKind | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  const aRank = FAILURE_KIND_PRIORITY.indexOf(a);
+  const bRank = FAILURE_KIND_PRIORITY.indexOf(b);
+  return aRank <= bRank ? a : b;
+}
 
 /** The one shape ever produced by `AskService.ask` before `confidence`/`insufficientEvidence` are
  *  folded into the final `Answer` response -- kept separate from `Answer` itself only so `error`
@@ -54,9 +172,13 @@ interface AnswerOutcome {
   retried?: boolean;
 }
 
-function refuseOutcome(error?: string): AnswerOutcome {
+function refuseOutcome(
+  error?: string,
+  failureKind?: ProviderFailureKind,
+  retryAfterSeconds?: number,
+): AnswerOutcome {
   return {
-    answer: REFUSE_MESSAGE,
+    answer: messageForFailureKind(failureKind, retryAfterSeconds),
     citations: [],
     confidence: 'low',
     insufficientEvidence: true,
@@ -69,6 +191,11 @@ function refuseOutcome(error?: string): AnswerOutcome {
  * names the top retrieved chunk's paper as an unproven best guess. `quotedPassage`/
  * `relevanceExplanation` are deliberately omitted from the citation -- it's a guess, not a
  * verified source (this story's Boundaries).
+ *
+ * This tier never runs at all when `currentPaper` is set (2026-09-03 second follow-up: `ask()`
+ * forces the confident tier whenever a specific paper is pinned, letting the LLM itself attempt
+ * a grounded answer rather than a templated guess) -- so `topChunk` here is always the true
+ * archive-wide top score's chunk, never a current-paper preference.
  */
 function clarifyOutcome(topChunk: RetrievedChunk): AnswerOutcome {
   return {
@@ -130,6 +257,13 @@ interface GenerateAttempt {
   answer: string;
   citations: Citation[];
   errorMessage?: string;
+  /** Set only when `errorMessage` came from a `ProviderUnavailableError` -- the call itself
+   *  never reached a usable response (network/rate-limit/5xx/4xx), as opposed to a response the
+   *  provider did return that failed schema validation (which leaves this `undefined`). */
+  providerFailureKind?: ProviderFailureKind;
+  /** Only meaningful alongside `providerFailureKind: 'rate_limited_short'` -- the provider's own
+   *  suggested wait, when it supplied one. */
+  retryAfterSeconds?: number;
 }
 
 /**
@@ -158,10 +292,27 @@ export class AskService {
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
-    @Inject(AI_PROVIDER) private readonly aiProvider: AIProvider,
+    @Inject(EMBEDDING_PROVIDER) private readonly embeddingProvider: EmbeddingProvider,
+    @Inject(GENERATION_PROVIDER) private readonly generationProvider: GenerationProvider,
+    @Inject(PAPER_REFERENCE_EXTRACTOR)
+    private readonly paperReferenceExtractor: PaperReferenceExtractor,
   ) {}
 
-  async ask(question: string): Promise<Answer> {
+  // `currentPaper` (Story 5.2, product-corrected 2026-09-02) is prompt context only -- retrieval
+  // below always searches the whole archive regardless of whether it's present. The original
+  // version of this method threaded it into `retrieveRelevantChunks`'s `paperNumber` filter
+  // option instead; that's been reverted (see the spec's Spec Change Log) because it made a
+  // genuinely cross-paper question unanswerable while the chip was showing.
+  async ask(
+    question: string,
+    currentPaper?: CurrentPaper,
+    /** Prior `done` question/answer turns, oldest first (spec-conversation-history-context.md) --
+     *  already validated/coerced/capped by `AskController` before this is ever called. Defaults
+     *  to `[]` so every existing caller (including this file's own tests) is unaffected: an empty
+     *  array produces byte-for-byte the same retrieval query and prompt as passing nothing at
+     *  all. */
+    history: ConversationTurn[] = [],
+  ): Promise<Answer> {
     const start = Date.now();
 
     // The embedding call inside retrieveRelevantChunks is common to every tier -- a tier can't
@@ -172,25 +323,144 @@ export class AskService {
     // hang or a fabricated 200 "insufficient evidence" answer that would misrepresent an outage
     // as a content outcome (I/O Edge-Case Matrix: "Embedding/LLM provider call fails ... Clear
     // error response ... Never a hang").
+    //
+    // The retrieval query itself is built from only the immediately preceding turn (this story's
+    // Boundaries), never the full history -- retrieveRelevantChunks's own signature/SQL are
+    // untouched, only the query *string* passed into it differs from the raw `question`.
+    const retrievalQuery = buildRetrievalQuery(question, history);
     let chunks: RetrievedChunk[];
     try {
-      chunks = await retrieveRelevantChunks(this.dataSource, this.aiProvider, question, {
-        topK: TOP_K,
-      });
+      chunks = await retrieveRelevantChunks(
+        this.dataSource,
+        this.embeddingProvider,
+        retrievalQuery,
+        { topK: TOP_K },
+      );
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      this.logRequest({ question, tier: undefined, chunks: [], start, error: errorMessage });
+      this.logRequest({
+        question,
+        tier: undefined,
+        retrievalTier: undefined,
+        chunks: [],
+        start,
+        error: errorMessage,
+      });
       throw err;
     }
 
+    // Tier is decided from the unrestricted search's own best match, captured here -- before any
+    // pinned-paper chunks below are appended -- so pinning can never inflate (or otherwise
+    // change) the confidence tier. A paper that didn't rank in the unrestricted top-K by
+    // definition can't have scored higher than this.
     const topScore = chunks[0]?.score;
-    const tier = decideAnswerTier(topScore);
+    const retrievalTier = decideAnswerTier(topScore);
 
-    const outcome = await this.resolveOutcome(tier, question, chunks);
+    // 2026-09-03 second follow-up: pinning alone (above) only fixes *which evidence* the LLM
+    // sees -- it does nothing about *whether* the LLM gets called at all, and a meta/summary-
+    // style question ("give me a TLDR") structurally can't score well against retrievalTier's
+    // archive-wide content-similarity gate no matter which paper is pinned, since the question
+    // text doesn't resemble any passage's *content*. When the chip names a specific paper (or,
+    // per spec-explicit-paper-number-pinning.md below, the question names one explicitly) and
+    // pinning actually succeeds in adding that paper's real content to `chunks`, that's a
+    // deterministic, code-decided signal that real evidence exists -- stronger than a raw
+    // similarity score for exactly this class of question -- so it overrides the gate to let the
+    // LLM attempt a real, grounded answer (the actual override condition, `hasGroundedPinnedPaper`,
+    // is computed further below, once the pin loop has actually run -- see its own doc comment for
+    // why detection alone isn't enough). This does not weaken the "never trust the LLM's
+    // self-reported confidence" principle behind that gate (decisions.md, "Confidence tiering"):
+    // citation verification below still fails safe to refuse if the answer isn't actually
+    // grounded, exactly as it already does for every other confident-tier attempt.
+    // Paper numbers named explicitly in the question text itself (spec-explicit-paper-number-
+    // pinning.md) -- extends the currentPaper pinning mechanism below to a second trigger, for
+    // questions like "what is paper 4 about?" that have almost no semantic similarity to that
+    // paper's actual content. The extractor call itself is wrapped so a future (non-regex)
+    // implementation's failure degrades to "no explicit references detected" rather than failing
+    // the whole question over an enhancement -- AskService depends only on the
+    // PaperReferenceExtractor interface, never on any one implementation succeeding.
+    let explicitPaperNumbers: number[] = [];
+    try {
+      explicitPaperNumbers = await this.paperReferenceExtractor.extractPaperNumbers(question);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to extract explicit paper-number references from the question: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    // MAX_EXPLICIT_PAPER_PINS caps how many of the extractor's (already validated/deduplicated)
+    // numbers get pinned -- a deliberate, documented truncation (this story's Boundaries), not an
+    // error. Enforced here regardless of extractor implementation, never inside the extractor.
+    const cappedExplicitPaperNumbers = explicitPaperNumbers.slice(0, MAX_EXPLICIT_PAPER_PINS);
+    if (explicitPaperNumbers.length > MAX_EXPLICIT_PAPER_PINS) {
+      this.logger.warn(
+        `Question referenced ${explicitPaperNumbers.length} distinct paper numbers -- ` +
+          `truncated to the first ${MAX_EXPLICIT_PAPER_PINS} (MAX_EXPLICIT_PAPER_PINS): ` +
+          `${cappedExplicitPaperNumbers.join(', ')} (dropped: ` +
+          `${explicitPaperNumbers.slice(MAX_EXPLICIT_PAPER_PINS).join(', ')})`,
+      );
+    }
+
+    // Pin each referenced paper's own full content as extra evidence when it didn't already make
+    // the unrestricted top-K on its own merits (2026-09-03 follow-up to the product correction
+    // above, extended by spec-explicit-paper-number-pinning.md to explicit in-question
+    // references): a vague, low-signal question ("summarize this paper", "give me a TLDR") or a
+    // question naming a paper by number otherwise has nothing anchoring it to that paper's real
+    // content, since retrieval no longer filters by it. currentPaper's own number and the
+    // explicitly-referenced numbers are merged into one deduplicated set first -- a paper named
+    // both ways (e.g. reading paper 1, asking "more about paper 1") is only fetched once. Unlike
+    // retrieveRelevantChunks, getAllChunksForPaper needs no embedding/AIProvider call at all --
+    // it's a plain lookup, so there's nothing here for a flaky LLM provider to fail. Best-effort
+    // per paper number: a failure pinning one doesn't block the others or fail the whole question.
+    const paperNumbersToPin = new Set<number>();
+    if (currentPaper) {
+      paperNumbersToPin.add(currentPaper.paperNumber);
+    }
+    for (const paperNumber of cappedExplicitPaperNumbers) {
+      paperNumbersToPin.add(paperNumber);
+    }
+
+    for (const paperNumber of paperNumbersToPin) {
+      if (chunks.some((chunk) => chunk.paperNumber === paperNumber)) {
+        continue;
+      }
+      try {
+        const pinnedChunks = await getAllChunksForPaper(this.dataSource, paperNumber);
+        chunks = [...chunks, ...pinnedChunks];
+      } catch (err) {
+        this.logger.warn(
+          `Failed to pin paper ${paperNumber}'s chunks as extra context: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    // The tier is forced to 'confident' only when at least one of the pinned-for paper numbers
+    // (currentPaper's own number and/or an explicitly-referenced one) actually ends up represented
+    // in `chunks` -- either because it was already in the unrestricted top-K, or because pinning
+    // above actually added it. This is checked here, AFTER the pin loop has run, deliberately: a
+    // referenced/current paper number is only a *candidate* signal that real evidence exists,
+    // never a guarantee -- `getAllChunksForPaper` resolving to an empty array (an in-range paper
+    // number with no chunks actually in the DB, e.g. a partial-ingestion gap) is a normal
+    // *outcome*, not a thrown error, and must not be treated as "evidence found" just because a
+    // reference was detected. Forcing 'confident' on detection alone (regardless of whether
+    // pinning actually produced anything) would let the LLM answer a paper-specific question using
+    // only the unrelated top-K chunks while still reporting `confidence: 'high'` -- exactly the
+    // "confidently wrong" failure mode citation verification and tiering exist to prevent. Citation
+    // verification below still fails safe to refuse if the answer isn't actually grounded either
+    // way; this check only decides whether the LLM gets a forced attempt at all.
+    const hasGroundedPinnedPaper = [...paperNumbersToPin].some((paperNumber) =>
+      chunks.some((chunk) => chunk.paperNumber === paperNumber),
+    );
+    const tier = hasGroundedPinnedPaper ? 'confident' : retrievalTier;
+
+    const outcome = await this.resolveOutcome(tier, question, chunks, currentPaper, history);
 
     this.logRequest({
       question,
       tier,
+      retrievalTier,
       chunks,
       start,
       error: outcome.error,
@@ -209,14 +479,20 @@ export class AskService {
     tier: AnswerTier,
     question: string,
     chunks: RetrievedChunk[],
+    currentPaper?: CurrentPaper,
+    history: ConversationTurn[] = [],
   ): Promise<AnswerOutcome> {
     switch (tier) {
       case 'confident':
-        return this.answerConfidently(question, chunks);
+        // currentPaper is prompt context for the LLM only -- clarify/refuse below never run at
+        // all when it's set (ask() forces this tier to 'confident' in that case), so there's
+        // nothing for either of them to thread it into. `history` is likewise LLM-prompt-only,
+        // so only this branch (the one that ever calls the LLM) needs it.
+        return this.answerConfidently(question, chunks, currentPaper, history);
       case 'clarify':
         // decideAnswerTier only returns 'clarify' when chunks[0] exists (a defined topScore
         // requires at least one chunk) -- the non-null assertion documents that invariant rather
-        // than re-deriving it.
+        // than re-deriving it. Only reachable when currentPaper is absent (see above).
         return clarifyOutcome(chunks[0]);
       case 'refuse':
         return refuseOutcome();
@@ -234,10 +510,12 @@ export class AskService {
   private async answerConfidently(
     question: string,
     chunks: RetrievedChunk[],
+    currentPaper?: CurrentPaper,
+    history: ConversationTurn[] = [],
   ): Promise<AnswerOutcome> {
     const retrievedChunkIds = new Set(chunks.map((chunk) => chunk.chunkId));
 
-    const first = await this.tryGenerate(question, chunks);
+    const first = await this.tryGenerate(question, chunks, undefined, currentPaper, history);
     if (first.errorMessage === undefined) {
       const verification = verifyCitations(first.citations, retrievedChunkIds);
       if (verification.valid) {
@@ -265,6 +543,9 @@ export class AskService {
         isEmptyCitations
           ? 'first attempt returned zero citations'
           : `first attempt cited invalid chunkId(s): ${verification.invalidChunkIds.join(', ')}`,
+        currentPaper,
+        undefined,
+        history,
       );
     }
 
@@ -274,6 +555,9 @@ export class AskService {
       retrievedChunkIds,
       buildInvalidOutputCorrection(first.errorMessage),
       `first attempt produced invalid output: ${first.errorMessage}`,
+      currentPaper,
+      first.providerFailureKind,
+      history,
     );
   }
 
@@ -283,8 +567,15 @@ export class AskService {
     retrievedChunkIds: ReadonlySet<string>,
     correction: string,
     firstFailureReason: string,
+    currentPaper?: CurrentPaper,
+    /** The *first* attempt's own `ProviderFailureKind` (if it had one) -- `undefined` when the
+     *  first attempt actually produced a response (e.g. this was called for a citation-
+     *  verification failure instead). Combined with the retry's own outcome below to decide the
+     *  final refuse message's wording. */
+    firstFailureKind?: ProviderFailureKind,
+    history: ConversationTurn[] = [],
   ): Promise<AnswerOutcome> {
-    const retry = await this.tryGenerate(question, chunks, correction);
+    const retry = await this.tryGenerate(question, chunks, correction, currentPaper, history);
     if (retry.errorMessage === undefined) {
       const verification = verifyCitations(retry.citations, retrievedChunkIds);
       if (verification.valid) {
@@ -299,6 +590,9 @@ export class AskService {
           retried: true,
         };
       }
+      // The retry *did* produce a response here, just one that still failed citation
+      // verification -- a data-quality refuse, not a provider outage, regardless of whether the
+      // first attempt was itself a provider failure.
       const retryFailureDetail =
         retry.citations.length === 0
           ? 'retry also returned zero citations'
@@ -306,18 +600,30 @@ export class AskService {
       return refuseOutcome(`${firstFailureReason}; ${retryFailureDetail}`);
     }
 
-    return refuseOutcome(`${firstFailureReason}; retry also failed: ${retry.errorMessage}`);
+    // Neither attempt produced a usable response -- if either one's failure was a genuine
+    // provider-side failure, say so honestly (and specifically -- a daily quota is not the same
+    // problem as a transient overload) instead of implying an evidence problem (`decisions.md`'s
+    // "Confidence tiering" citation-verification safety net still applies either way: this is
+    // only about which message text is shown, never about skipping verification).
+    const failureKind = pickMoreSpecificFailureKind(firstFailureKind, retry.providerFailureKind);
+    return refuseOutcome(
+      `${firstFailureReason}; retry also failed: ${retry.errorMessage}`,
+      failureKind,
+      retry.retryAfterSeconds,
+    );
   }
 
   private async tryGenerate(
     question: string,
     chunks: RetrievedChunk[],
     correction?: string,
+    currentPaper?: CurrentPaper,
+    history: ConversationTurn[] = [],
   ): Promise<GenerateAttempt> {
     try {
-      const output = await this.aiProvider.generateStructuredOutput({
+      const output = await this.generationProvider.generateStructuredOutput({
         systemInstruction: ANSWER_SYSTEM_INSTRUCTION,
-        prompt: buildAnswerPrompt(question, chunks, correction),
+        prompt: buildAnswerPrompt(question, chunks, correction, currentPaper, history),
         schema: LlmAnswerOutputSchema,
       });
       return { answer: output.answer, citations: output.citations };
@@ -326,6 +632,10 @@ export class AskService {
         answer: '',
         citations: [],
         errorMessage: err instanceof Error ? err.message : String(err),
+        providerFailureKind:
+          err instanceof ProviderUnavailableError ? err.kind : undefined,
+        retryAfterSeconds:
+          err instanceof ProviderUnavailableError ? err.retryAfterSeconds : undefined,
       };
     }
   }
@@ -336,6 +646,12 @@ export class AskService {
   private logRequest(params: {
     question: string;
     tier: AnswerTier | undefined;
+    /** The tier `decideAnswerTier` actually computed from the raw archive-wide top score --
+     *  logged alongside `tier` (the effective tier resolveOutcome ran with) so an operator can
+     *  tell a currentPaper override apart from a genuine confident-tier match (2026-09-03 second
+     *  follow-up). `undefined` whenever `tier` itself is (the retrieval-failure path never gets
+     *  this far). */
+    retrievalTier: AnswerTier | undefined;
     chunks: RetrievedChunk[];
     start: number;
     error?: string;
@@ -345,7 +661,7 @@ export class AskService {
      *  in the request log. */
     retried?: boolean;
   }): void {
-    const { question, tier, chunks, start, error, retried } = params;
+    const { question, tier, retrievalTier, chunks, start, error, retried } = params;
     // Explicit `!== undefined` check, not a truthy check -- an `Error` with an empty-string
     // `.message` (e.g. `new Error('')`) is still a genuine error and must log at 'error' level,
     // not silently fall through to 'log' just because the message happens to be falsy. Mirrors
@@ -357,6 +673,7 @@ export class AskService {
         event: 'ask',
         question,
         tier,
+        tierOverriddenByCurrentPaper: tier !== undefined && tier !== retrievalTier,
         retrievedPaperNumbers: chunks.map((chunk) => chunk.paperNumber),
         similarityScores: chunks.map((chunk) => Number(chunk.score.toFixed(4))),
         provider: resolveProviderName(),

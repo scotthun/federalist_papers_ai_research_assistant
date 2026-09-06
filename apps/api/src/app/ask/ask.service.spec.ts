@@ -1,21 +1,47 @@
 import { Logger } from '@nestjs/common';
-import type { AIProvider } from '@federalist-research/ai';
+import {
+  ProviderUnavailableError,
+  type EmbeddingProvider,
+  type GenerationProvider,
+} from '@federalist-research/ai';
 import { LlmAnswerOutputSchema } from '@federalist-research/shared';
 import { DataSource } from 'typeorm';
+import type { ConversationTurn } from './answer-prompt';
 import { CLARIFY_THRESHOLD, CONFIDENT_THRESHOLD } from './answer-thresholds';
-import { AskService, REFUSE_MESSAGE } from './ask.service';
+import {
+  AskService,
+  CONTEXT_LENGTH_EXCEEDED_MESSAGE,
+  MAX_EXPLICIT_PAPER_PINS,
+  PROVIDER_UNAVAILABLE_MESSAGE,
+  REFUSE_MESSAGE,
+} from './ask.service';
+import type { PaperReferenceExtractor } from './paper-reference-extractor';
 
 /**
  * Fakes both boundaries AskService composes through the real `retrieveRelevantChunks` (its own
  * SQL/filter correctness is covered by libs/retrieval's specs, not re-tested here) and the real
- * `AIProvider` interface -- this spec covers only AskService's own orchestration: tier
- * branching, prompt construction, citation verification, the one-retry-then-fail-safe policy,
- * and logging.
+ * `EmbeddingProvider`/`GenerationProvider` interfaces -- this spec covers only AskService's own
+ * orchestration: tier branching, prompt construction, citation verification, the
+ * one-retry-then-fail-safe policy, and logging. One fake object implements both interfaces
+ * (production wires the always-Gemini embedding half and the AI_PROVIDER-driven generation half
+ * as two separate injected providers -- see ai-provider.provider.ts -- but nothing this spec
+ * asserts distinguishes them, so a single fake passed as both constructor args keeps every
+ * existing assertion valid).
  */
-function fakeAiProvider(): AIProvider {
+function fakeAiProvider(): EmbeddingProvider & GenerationProvider {
   return {
     generateEmbedding: jest.fn().mockResolvedValue([0.1, 0.2, 0.3]),
     generateStructuredOutput: jest.fn(),
+  };
+}
+
+/** Fakes `PaperReferenceExtractor` (spec-explicit-paper-number-pinning.md) -- defaults to "no
+ *  explicit references detected" so every existing test (which predates this extractor) is
+ *  unaffected; tests that care about explicit-reference pinning override
+ *  `extractPaperNumbers`'s mock resolution/rejection explicitly. */
+function fakePaperReferenceExtractor(): PaperReferenceExtractor {
+  return {
+    extractPaperNumbers: jest.fn().mockResolvedValue([]),
   };
 }
 
@@ -43,10 +69,14 @@ function fakeDataSource(rows: FakeRow[]): { dataSource: DataSource; query: jest.
   return { dataSource: { query } as unknown as DataSource, query };
 }
 
-function buildService(rows: FakeRow[], aiProvider: AIProvider = fakeAiProvider()) {
+function buildService(
+  rows: FakeRow[],
+  aiProvider: EmbeddingProvider & GenerationProvider = fakeAiProvider(),
+  paperReferenceExtractor: PaperReferenceExtractor = fakePaperReferenceExtractor(),
+) {
   const { dataSource, query } = fakeDataSource(rows);
-  const service = new AskService(dataSource, aiProvider);
-  return { service, aiProvider, query };
+  const service = new AskService(dataSource, aiProvider, aiProvider, paperReferenceExtractor);
+  return { service, aiProvider, query, paperReferenceExtractor };
 }
 
 describe('AskService', () => {
@@ -199,6 +229,157 @@ describe('AskService', () => {
         insufficientEvidence: true,
       });
       expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+    });
+
+    // 2026-09-03 third follow-up: REFUSE_MESSAGE ("I couldn't find sufficient evidence...")
+    // wrongly implies a content/evidence problem when the real cause is that the AI provider
+    // itself was never reached (e.g. a 503 "high demand" response) -- confusing given the
+    // question and evidence were both fine. PROVIDER_UNAVAILABLE_MESSAGE says so honestly.
+    it('shows PROVIDER_UNAVAILABLE_MESSAGE (not REFUSE_MESSAGE) when both attempts fail with an "overloaded" provider failure', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError('503 Service Unavailable: high demand', 'overloaded'),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+      expect(result.answer).not.toBe(REFUSE_MESSAGE);
+      expect(result.confidence).toBe('low');
+      expect(result.insufficientEvidence).toBe(true);
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+    });
+
+    it('shows PROVIDER_UNAVAILABLE_MESSAGE when only the first attempt is a provider failure but the retry still fails a different way', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable', 'overloaded'))
+        .mockRejectedValueOnce(new Error('Gemini returned no text response'));
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+    });
+
+    // 2026-09-03 second follow-up: a single generic "provider unavailable" bucket used to cover
+    // every failure alike -- confusingly, since a 429 daily-quota exhaustion and a 503 overload
+    // need very different user-facing advice ("come back tomorrow" vs "try again in a moment").
+    it('shows the daily-quota-specific message for a 429 whose QuotaFailure detail names a per-day quota', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError(
+          '429 Too Many Requests: quota exceeded',
+          'rate_limited_daily',
+        ),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('daily request limit');
+      expect(result.answer).not.toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+      expect(result.answer).not.toBe(REFUSE_MESSAGE);
+    });
+
+    it('shows a wait-and-retry message (including the provider-supplied delay) for a short-window 429', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError(
+          '429 Too Many Requests',
+          'rate_limited_short',
+          undefined,
+          18,
+        ),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('rate-limited');
+      expect(result.answer).toContain('18s');
+    });
+
+    it('shows a distinct message for a genuine 5xx server error (not the 503 "high demand" wording)', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError('500 Internal Server Error', 'server_error'),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('internal error');
+      expect(result.answer).not.toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+    });
+
+    it("shows a configuration-problem message for a 4xx that isn't a rate limit (e.g. a bad API key), telling the user a retry won't help", async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError('401 Unauthorized', 'client_error'),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('configuration problem');
+    });
+
+    it('prefers the more specific/actionable failure kind when the first attempt and the retry fail with different kinds (daily quota beats a mere overload)', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable', 'overloaded'))
+        .mockRejectedValueOnce(
+          new ProviderUnavailableError('429 Too Many Requests', 'rate_limited_daily'),
+        );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toContain('daily request limit');
+    });
+
+    it('still shows REFUSE_MESSAGE (not the provider-unavailable wording) when the retry succeeds in getting a response that just fails citation verification', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockRejectedValueOnce(new ProviderUnavailableError('503 Service Unavailable', 'overloaded'))
+        .mockResolvedValueOnce({
+          answer: 'A response with a fabricated citation.',
+          citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
+        });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      // The retry *did* get a response from the provider -- it was just ungrounded, a
+      // data-quality refuse rather than a provider-outage one, even though the first attempt
+      // was a genuine provider failure.
+      expect(result.answer).toBe(REFUSE_MESSAGE);
     });
 
     it('fails safe (never crashes) when the first attempt returns zero citations, retrying with the zero-citations correction (not the fabricated-chunkId message)', async () => {
@@ -388,6 +569,11 @@ describe('AskService', () => {
       expect(aiProvider.generateStructuredOutput).not.toHaveBeenCalled();
       expect(result.insufficientEvidence).toBe(true);
     });
+
+    // 2026-09-03 second follow-up: this tier never runs at all once a current paper is present
+    // -- ask() forces the confident tier instead, so the LLM gets a real chance at a grounded
+    // answer rather than a templated guess. See the "forces the confident tier" describe block
+    // below for that behavior; clarify tier itself is unchanged for the no-currentPaper case.
   });
 
   describe('refuse tier', () => {
@@ -422,6 +608,764 @@ describe('AskService', () => {
         confidence: 'low',
         insufficientEvidence: true,
       });
+    });
+  });
+
+  // Story 5.2 (product-corrected 2026-09-02): `currentPaper` is prompt context for the LLM only
+  // -- it must reach `buildAnswerPrompt`'s prompt text, and it must NOT reach
+  // `retrieveRelevantChunks`'s SQL. The original version of this story threaded it into the
+  // retrieval filter instead (reverted per the spec's Spec Change Log); the product owner
+  // reconsidered because a hard filter made a genuinely cross-paper question unanswerable while
+  // the chip was showing.
+  describe('currentPaper prompt context (Story 5.2)', () => {
+    it('includes the current paper as a contextual note in the prompt sent to the LLM', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Ambition must be made to counteract ambition.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).toContain('Federalist No. 10');
+      expect(call.prompt).toContain('The Same Subject Continued');
+      // The note must read as context, not a restriction -- proving this isn't a regression back
+      // toward "only answer from this paper."
+      expect(call.prompt).toContain('context only');
+    });
+
+    it('omits any paper-context note from the prompt when currentPaper is absent', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Ambition must be made to counteract ambition.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?');
+
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).not.toContain('currently reading');
+    });
+
+    it('carries the paper-context note through to the one allowed retry prompt too', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockResolvedValueOnce({
+          answer: 'A fabricated answer.',
+          citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
+        })
+        .mockResolvedValueOnce({
+          answer: 'The corrected, grounded answer.',
+          citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+        });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+      const retryCall = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[1][0];
+      expect(retryCall.prompt).toContain('Federalist No. 10');
+    });
+
+    it('never adds a paperNumber bound SQL parameter, even when currentPaper is provided', async () => {
+      const aiProvider = fakeAiProvider();
+      const { service, query } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?', {
+        paperNumber: 51,
+        title: 'The Structure of the Government',
+      });
+
+      expect(query).toHaveBeenCalledTimes(1);
+      const [, params] = query.mock.calls[0];
+      expect(params).not.toContain(51);
+    });
+  });
+
+  // 2026-09-03 follow-up: a vague, low-signal question ("give me a TLDR") has nothing anchoring
+  // it to the paper the user is actually reading now that the hard filter above is gone. Pinning
+  // the current paper's own full content as extra evidence (no embedding call -- a plain lookup,
+  // libs/retrieval's getAllChunksForPaper) closes that gap without reintroducing a filter.
+  describe('pinning the current paper as extra evidence (2026-09-03)', () => {
+    it('pins the current paper via a second, plain (non-embedding) lookup when it did not rank in the unrestricted results, and the LLM can cite it', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A summary grounded in the pinned paper.',
+        citations: [
+          { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+        ],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CONFIDENT_THRESHOLD }),
+        ])
+        .mockResolvedValueOnce([
+          {
+            chunkId: 'pinned-chunk-1',
+            paperNumber: 10,
+            paperTitle: 'The Same Subject Continued',
+            content: 'Pinned paper content.',
+          },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider, aiProvider, fakePaperReferenceExtractor());
+
+      const result = await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(query).toHaveBeenCalledTimes(2);
+      const [secondSql, secondParams] = query.mock.calls[1];
+      expect(secondParams).toEqual([10]);
+      expect(secondSql).not.toMatch(/embedding/i);
+
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).toContain('pinned-chunk-1');
+      expect(call.prompt).toContain('Pinned paper content.');
+      // The pinned chunk was part of the real, verified evidence set -- citing it succeeds
+      // rather than failing safe to a refuse-tier retry.
+      expect(result.confidence).toBe('high');
+      expect(result.citations).toEqual([
+        { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+      ]);
+    });
+
+    // 2026-09-03 second follow-up: superseded the original version of this test (which asserted
+    // the tier stayed 'clarify' and no LLM call happened). That's no longer this fix's goal --
+    // see the "forces the confident tier" describe block below, which now covers exactly this
+    // scenario (a low, sub-CLARIFY_THRESHOLD raw score, currentPaper present) and asserts the
+    // LLM *is* called, grounded in the pinned chunk.
+
+    it('does not attempt a second lookup when the current paper already appears in the unrestricted results', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer.',
+        citations: [{ paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'chunk-1' }],
+      });
+      const { service, query } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 10, score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(query).toHaveBeenCalledTimes(1);
+    });
+
+    it('degrades gracefully (no thrown error) when the pinning lookup itself fails', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer from the unrestricted results alone.',
+        citations: [{ paperNumber: 51, paperTitle: 'The Structure of the Government', chunkId: 'chunk-1' }],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([fakeRow({ chunkId: 'chunk-1', paperNumber: 51, score: CONFIDENT_THRESHOLD })])
+        .mockRejectedValueOnce(new Error('pinning lookup failed'));
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider, aiProvider, fakePaperReferenceExtractor());
+
+      const result = await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(result.confidence).toBe('high');
+      expect(result.citations).toEqual([
+        { paperNumber: 51, paperTitle: 'The Structure of the Government', chunkId: 'chunk-1' },
+      ]);
+    });
+  });
+
+  // 2026-09-03 second follow-up: pinning alone (above) only fixes which evidence the LLM sees,
+  // not whether it gets called at all -- a meta/summary-style question ("give me a TLDR")
+  // structurally can't score well against decideAnswerTier's archive-wide content-similarity
+  // gate no matter which paper is pinned. When the chip names a specific paper, that's itself a
+  // stronger, deterministic signal than the raw score, so it overrides the gate entirely.
+  describe('forces the confident tier when currentPaper is present (2026-09-03)', () => {
+    it('calls the LLM (grounded in the pinned chunk) even though the raw archive-wide score alone would only reach the clarify tier', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A real answer grounded in the pinned paper.',
+        citations: [
+          { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+        ],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'clarify-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD }),
+        ])
+        .mockResolvedValueOnce([
+          {
+            chunkId: 'pinned-chunk-1',
+            paperNumber: 10,
+            paperTitle: 'The Same Subject Continued',
+            content: 'Pinned paper content.',
+          },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider, aiProvider, fakePaperReferenceExtractor());
+
+      const result = await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(1);
+      expect(result.confidence).toBe('high');
+      expect(result.citations).toEqual([
+        { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+      ]);
+    });
+
+    it('calls the LLM even when the raw archive-wide score would only reach the refuse tier', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A real answer grounded in the pinned paper.',
+        citations: [
+          { paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'pinned-chunk-1' },
+        ],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'refuse-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+        ])
+        .mockResolvedValueOnce([
+          {
+            chunkId: 'pinned-chunk-1',
+            paperNumber: 10,
+            paperTitle: 'The Same Subject Continued',
+            content: 'Pinned paper content.',
+          },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const service = new AskService(dataSource, aiProvider, aiProvider, fakePaperReferenceExtractor());
+
+      const result = await service.ask('Yes', { paperNumber: 10, title: 'The Same Subject Continued' });
+
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(1);
+      expect(result.confidence).toBe('high');
+    });
+
+    it('still fails safe to refuse if the forced LLM call cannot produce a verified citation -- the override never bypasses citation verification', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A fabricated answer.',
+        citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Yes', { paperNumber: 10, title: 'The Same Subject Continued' });
+
+      expect(result.confidence).toBe('low');
+      expect(result.insufficientEvidence).toBe(true);
+      expect(result.citations).toEqual([]);
+    });
+
+    it('logs tierOverriddenByCurrentPaper: true only when the override actually changed the tier', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer.',
+        citations: [{ paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 10, score: CLARIFY_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Can you give me a TLDR?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      const parsed = JSON.parse(logSpy.mock.calls[0][0]);
+      expect(parsed.tier).toBe('confident');
+      expect(parsed.tierOverriddenByCurrentPaper).toBe(true);
+    });
+
+    it('logs tierOverriddenByCurrentPaper: false when the raw score already reached confident on its own', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer.',
+        citations: [{ paperNumber: 10, paperTitle: 'The Same Subject Continued', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', paperNumber: 10, score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?', {
+        paperNumber: 10,
+        title: 'The Same Subject Continued',
+      });
+
+      const parsed = JSON.parse(logSpy.mock.calls[0][0]);
+      expect(parsed.tierOverriddenByCurrentPaper).toBe(false);
+    });
+  });
+
+  // spec-explicit-paper-number-pinning.md: extends the currentPaper pinning mechanism above to a
+  // second trigger -- paper numbers named explicitly in the question text itself (e.g. "what is
+  // paper 4 about?"), detected via the injected PaperReferenceExtractor rather than any
+  // hardcoded regex living in AskService itself.
+  describe('explicit paper-number references in the question (spec-explicit-paper-number-pinning.md)', () => {
+    it('pins a single explicitly-referenced paper as extra evidence and forces the confident tier', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Federalist No. 4 concerns dangers from foreign force and influence.',
+        citations: [{ paperNumber: 4, paperTitle: 'Federalist No. 4', chunkId: 'pinned-chunk-4' }],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+        ])
+        .mockResolvedValueOnce([
+          {
+            chunkId: 'pinned-chunk-4',
+            paperNumber: 4,
+            paperTitle: 'Federalist No. 4',
+            content: 'Concerning dangers from foreign force and influence.',
+          },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const extractor: PaperReferenceExtractor = {
+        extractPaperNumbers: jest.fn().mockResolvedValue([4]),
+      };
+      const service = new AskService(dataSource, aiProvider, aiProvider, extractor);
+
+      const result = await service.ask('What is paper 4 about?');
+
+      expect(extractor.extractPaperNumbers).toHaveBeenCalledWith('What is paper 4 about?');
+      expect(query).toHaveBeenCalledTimes(2);
+      const [secondSql, secondParams] = query.mock.calls[1];
+      expect(secondParams).toEqual([4]);
+      expect(secondSql).not.toMatch(/embedding/i);
+      expect(result.confidence).toBe('high');
+      expect(result.citations).toEqual([
+        { paperNumber: 4, paperTitle: 'Federalist No. 4', chunkId: 'pinned-chunk-4' },
+      ]);
+    });
+
+    it('pins multiple explicitly-referenced papers (within the cap) all at once', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Comparing papers 4 and 6.',
+        citations: [
+          { paperNumber: 4, paperTitle: 'Federalist No. 4', chunkId: 'pinned-chunk-4' },
+          { paperNumber: 6, paperTitle: 'Federalist No. 6', chunkId: 'pinned-chunk-6' },
+        ],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+        ])
+        .mockResolvedValueOnce([
+          { chunkId: 'pinned-chunk-4', paperNumber: 4, paperTitle: 'Federalist No. 4', content: 'Paper 4 content.' },
+        ])
+        .mockResolvedValueOnce([
+          { chunkId: 'pinned-chunk-6', paperNumber: 6, paperTitle: 'Federalist No. 6', content: 'Paper 6 content.' },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const extractor: PaperReferenceExtractor = {
+        extractPaperNumbers: jest.fn().mockResolvedValue([4, 6]),
+      };
+      const service = new AskService(dataSource, aiProvider, aiProvider, extractor);
+
+      const result = await service.ask('Compare papers 4 and 6');
+
+      expect(query).toHaveBeenCalledTimes(3);
+      expect(result.confidence).toBe('high');
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).toContain('pinned-chunk-4');
+      expect(call.prompt).toContain('pinned-chunk-6');
+    });
+
+    it('truncates to MAX_EXPLICIT_PAPER_PINS when the extractor returns more distinct numbers than the cap', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer.',
+        citations: [],
+      });
+      const allNumbers = Array.from({ length: MAX_EXPLICIT_PAPER_PINS + 3 }, (_, i) => i + 1);
+      const query = jest.fn().mockResolvedValue([
+        fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+      ]);
+      const dataSource = { query } as unknown as DataSource;
+      const extractor: PaperReferenceExtractor = {
+        extractPaperNumbers: jest.fn().mockResolvedValue(allNumbers),
+      };
+      const service = new AskService(dataSource, aiProvider, aiProvider, extractor);
+
+      await service.ask('Summarize every paper you can.');
+
+      // One call for the unrestricted retrieval + exactly MAX_EXPLICIT_PAPER_PINS pin lookups --
+      // never one per every number the extractor returned.
+      expect(query).toHaveBeenCalledTimes(1 + MAX_EXPLICIT_PAPER_PINS);
+      const pinnedParams = query.mock.calls.slice(1).map(([, params]) => params[0]);
+      expect(pinnedParams).toEqual(allNumbers.slice(0, MAX_EXPLICIT_PAPER_PINS));
+    });
+
+    it('fetches a paper referenced both by currentPaper and explicitly in the question only once', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'More about paper 1.',
+        citations: [{ paperNumber: 1, paperTitle: 'General Introduction', chunkId: 'pinned-chunk-1' }],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+        ])
+        .mockResolvedValueOnce([
+          { chunkId: 'pinned-chunk-1', paperNumber: 1, paperTitle: 'General Introduction', content: 'Paper 1 content.' },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const extractor: PaperReferenceExtractor = {
+        extractPaperNumbers: jest.fn().mockResolvedValue([1]),
+      };
+      const service = new AskService(dataSource, aiProvider, aiProvider, extractor);
+
+      const result = await service.ask('More about paper 1', { paperNumber: 1, title: 'General Introduction' });
+
+      // Exactly one pin lookup (plus the unrestricted retrieval) -- never twice for the same
+      // paper number just because it was named both ways.
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(result.confidence).toBe('high');
+    });
+
+    it('pins currentPaper and a different explicitly-referenced paper both, when they differ', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Comparing paper 1 to paper 4.',
+        citations: [{ paperNumber: 4, paperTitle: 'Federalist No. 4', chunkId: 'pinned-chunk-4' }],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+        ])
+        .mockResolvedValueOnce([
+          { chunkId: 'pinned-chunk-1', paperNumber: 1, paperTitle: 'General Introduction', content: 'Paper 1 content.' },
+        ])
+        .mockResolvedValueOnce([
+          { chunkId: 'pinned-chunk-4', paperNumber: 4, paperTitle: 'Federalist No. 4', content: 'Paper 4 content.' },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const extractor: PaperReferenceExtractor = {
+        extractPaperNumbers: jest.fn().mockResolvedValue([4]),
+      };
+      const service = new AskService(dataSource, aiProvider, aiProvider, extractor);
+
+      await service.ask('Compare to paper 4', { paperNumber: 1, title: 'General Introduction' });
+
+      expect(query).toHaveBeenCalledTimes(3);
+    });
+
+    it('skips a referenced paper whose pin lookup fails, without blocking the other referenced papers', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Answer grounded in paper 6 only.',
+        citations: [{ paperNumber: 6, paperTitle: 'Federalist No. 6', chunkId: 'pinned-chunk-6' }],
+      });
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+        ])
+        .mockRejectedValueOnce(new Error('pin lookup for paper 4 failed'))
+        .mockResolvedValueOnce([
+          { chunkId: 'pinned-chunk-6', paperNumber: 6, paperTitle: 'Federalist No. 6', content: 'Paper 6 content.' },
+        ]);
+      const dataSource = { query } as unknown as DataSource;
+      const extractor: PaperReferenceExtractor = {
+        extractPaperNumbers: jest.fn().mockResolvedValue([4, 6]),
+      };
+      const service = new AskService(dataSource, aiProvider, aiProvider, extractor);
+
+      const result = await service.ask('Compare papers 4 and 6');
+
+      expect(result.confidence).toBe('high');
+      expect(result.citations).toEqual([
+        { paperNumber: 6, paperTitle: 'Federalist No. 6', chunkId: 'pinned-chunk-6' },
+      ]);
+    });
+
+    it('degrades to "no explicit references" (never fails the whole question) when the extractor itself rejects', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Ambition must be made to counteract ambition.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const extractor: PaperReferenceExtractor = {
+        extractPaperNumbers: jest.fn().mockRejectedValue(new Error('extractor exploded')),
+      };
+      const { service, query } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+        extractor,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.confidence).toBe('high');
+      expect(result.answer).toBe('Ambition must be made to counteract ambition.');
+      // No extra pin lookup was attempted -- degraded to behaving exactly as if the extractor had
+      // returned [].
+      expect(query).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not force the confident tier when the extractor finds nothing and no currentPaper is set (no regression)', async () => {
+      const aiProvider = fakeAiProvider();
+      const { service } = buildService(
+        [fakeRow({ score: CLARIFY_THRESHOLD - 0.2, paperNumber: 12 })],
+        aiProvider,
+      );
+
+      const result = await service.ask('a refuse-tier question with no paper references');
+
+      expect(aiProvider.generateStructuredOutput).not.toHaveBeenCalled();
+      expect(result.confidence).toBe('low');
+      expect(result.insufficientEvidence).toBe(true);
+    });
+
+    // Bug found in review: a referenced paper number that is in-range but genuinely has no chunks
+    // in the DB (e.g. a partial-ingestion gap) makes getAllChunksForPaper resolve to an empty
+    // array -- a normal outcome, not a thrown error -- which must NOT be treated as "evidence
+    // found" just because a reference was detected. Forcing the confident tier here would let the
+    // LLM answer using only the unrelated top-K chunks while still reporting `confidence: 'high'`,
+    // exactly the "confidently wrong" failure mode citation verification/tiering exists to
+    // prevent.
+    it('does not force the confident tier when a referenced paper\'s pin lookup resolves to zero chunks (not a rejection)', async () => {
+      const aiProvider = fakeAiProvider();
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce([
+          fakeRow({ chunkId: 'unrelated-chunk', paperNumber: 51, score: CLARIFY_THRESHOLD - 0.2 }),
+        ])
+        .mockResolvedValueOnce([]); // the pin lookup for paper 4 -- in range, but no chunks exist
+      const dataSource = { query } as unknown as DataSource;
+      const extractor: PaperReferenceExtractor = {
+        extractPaperNumbers: jest.fn().mockResolvedValue([4]),
+      };
+      const service = new AskService(dataSource, aiProvider, aiProvider, extractor);
+
+      const result = await service.ask('What is paper 4 about?');
+
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(aiProvider.generateStructuredOutput).not.toHaveBeenCalled();
+      expect(result.confidence).toBe('low');
+      expect(result.insufficientEvidence).toBe(true);
+      expect(result.citations).toEqual([]);
+    });
+  });
+
+  // spec-conversation-history-context.md: `history` threads into (1) the retrieval query (built
+  // from only the immediately preceding turn) and (2) the generation prompt (the full history, as
+  // a "CONVERSATION SO FAR" block), and is never persisted or otherwise threaded anywhere else.
+  describe('conversation history (spec-conversation-history-context.md)', () => {
+    const history: ConversationTurn[] = [
+      { question: 'Which papers discuss factions?', answer: 'No. 10 and No. 51.' },
+      { question: 'Which one is most similar to No. 6?', answer: 'No. 8 is most similar to No. 6.' },
+    ];
+
+    it('builds the retrieval embedding query from only the immediately preceding turn plus the new question', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'They compare favorably.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Can you compare and contrast these two papers?', undefined, history);
+
+      expect(aiProvider.generateEmbedding).toHaveBeenCalledTimes(1);
+      const embeddedQuery = (aiProvider.generateEmbedding as jest.Mock).mock.calls[0][0];
+      expect(embeddedQuery).toContain('Which one is most similar to No. 6?');
+      expect(embeddedQuery).toContain('No. 8 is most similar to No. 6.');
+      expect(embeddedQuery).toContain('Can you compare and contrast these two papers?');
+      // The older, first turn is deliberately excluded from the retrieval query.
+      expect(embeddedQuery).not.toContain('Which papers discuss factions?');
+    });
+
+    it('passes the full history into the generation prompt as a CONVERSATION SO FAR block', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'They compare favorably.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Can you compare and contrast these two papers?', undefined, history);
+
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).toContain('CONVERSATION SO FAR');
+      // Both turns -- including the older one excluded from the retrieval query above -- appear
+      // in the prompt: the full (uncapped-by-default) history goes to the LLM, only the
+      // retrieval query is narrowed to the immediately preceding turn.
+      expect(call.prompt).toContain('Which papers discuss factions?');
+      expect(call.prompt).toContain('Which one is most similar to No. 6?');
+    });
+
+    it('carries history through to the one allowed retry prompt too', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockResolvedValueOnce({
+          answer: 'A fabricated answer.',
+          citations: [{ paperNumber: 999, paperTitle: 'Not Real', chunkId: 'chunk-FABRICATED' }],
+        })
+        .mockResolvedValueOnce({
+          answer: 'The corrected, grounded answer.',
+          citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+        });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Can you compare and contrast these two papers?', undefined, history);
+
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+      const retryCall = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[1][0];
+      expect(retryCall.prompt).toContain('CONVERSATION SO FAR');
+      expect(retryCall.prompt).toContain('Which one is most similar to No. 6?');
+    });
+
+    // AC: "Given the model attempts to cite a chunkId that only appeared in a previous turn's
+    // evidence, when verifyCitations runs, then it is still rejected exactly as it is today" --
+    // no code change to verifyCitations itself; this just confirms history doesn't create a new
+    // citation-bypass path now that the prompt actually carries prior conversation content.
+    it('still rejects a citation whose chunkId never appeared in this call\'s own retrieved chunks, even with history present', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'A fabricated answer citing a chunk from an earlier turn.',
+        citations: [
+          { paperNumber: 8, paperTitle: 'Federalist No. 8', chunkId: 'chunk-from-a-prior-turn' },
+        ],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask(
+        'Can you compare and contrast these two papers?',
+        undefined,
+        history,
+      );
+
+      expect(result).toEqual({
+        answer: REFUSE_MESSAGE,
+        citations: [],
+        confidence: 'low',
+        insufficientEvidence: true,
+      });
+      expect(aiProvider.generateStructuredOutput).toHaveBeenCalledTimes(2);
+    });
+
+    it('behaves byte-for-byte as before when history is omitted (no regression)', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockResolvedValue({
+        answer: 'Ambition must be made to counteract ambition.',
+        citations: [{ paperNumber: 51, paperTitle: 'Federalist No. 51', chunkId: 'chunk-1' }],
+      });
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      await service.ask('Why checks and balances?');
+
+      const embeddedQuery = (aiProvider.generateEmbedding as jest.Mock).mock.calls[0][0];
+      expect(embeddedQuery).toBe('Why checks and balances?');
+      const call = (aiProvider.generateStructuredOutput as jest.Mock).mock.calls[0][0];
+      expect(call.prompt).not.toContain('CONVERSATION SO FAR');
+    });
+  });
+
+  // spec-conversation-history-context.md's second safety addition: a distinct, honest message
+  // for a provider rejection caused by the request (question + evidence + history) exceeding the
+  // model's context window -- must never repeat CLIENT_ERROR_MESSAGE's "not something your
+  // question caused" wording, since a too-long conversation genuinely is something the user's
+  // session caused.
+  describe('context_length_exceeded provider failure', () => {
+    it('shows CONTEXT_LENGTH_EXCEEDED_MESSAGE (pointing at Clear chat) when both attempts fail with that kind', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock).mockRejectedValue(
+        new ProviderUnavailableError(
+          '400 Bad Request: context length exceeded',
+          'context_length_exceeded',
+        ),
+      );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toBe(CONTEXT_LENGTH_EXCEEDED_MESSAGE);
+      expect(result.answer).not.toBe(REFUSE_MESSAGE);
+      expect(result.answer).not.toBe(PROVIDER_UNAVAILABLE_MESSAGE);
+      expect(result.answer.toLowerCase()).not.toContain('not something your question caused');
+      expect(result.answer.toLowerCase()).toContain('clear chat');
+    });
+
+    it('prefers context_length_exceeded over any other failure kind from the other attempt', async () => {
+      const aiProvider = fakeAiProvider();
+      (aiProvider.generateStructuredOutput as jest.Mock)
+        .mockRejectedValueOnce(
+          new ProviderUnavailableError('429 Too Many Requests', 'rate_limited_daily'),
+        )
+        .mockRejectedValueOnce(
+          new ProviderUnavailableError('400 Bad Request', 'context_length_exceeded'),
+        );
+      const { service } = buildService(
+        [fakeRow({ chunkId: 'chunk-1', score: CONFIDENT_THRESHOLD })],
+        aiProvider,
+      );
+
+      const result = await service.ask('Why checks and balances?');
+
+      expect(result.answer).toBe(CONTEXT_LENGTH_EXCEEDED_MESSAGE);
     });
   });
 

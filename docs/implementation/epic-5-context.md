@@ -16,7 +16,7 @@ Replace the existing inline "Ask the Archive" page section with a persistent, fl
 
 - The quill widget is stateless per message server-side: each chat message is an independent request to the existing ask endpoint, with no server-side conversational memory and no follow-up resolution (a "what about him?" style question won't resolve against a prior turn). This follows from having no auth/user accounts.
 - Chat history is client-side only, held in `sessionStorage` (not `localStorage`, not a cookie): it survives navigation between pages in the same tab but clears on tab close. No network or database round-trip for history.
-- The paper-context chip's filter reuses the existing paper-number retrieval filter mechanism (filter-before-limit) — it is not a new filtering capability.
+- The paper-context chip tells the LLM which paper the user is currently reading as prompt context only (product correction, 2026-09-02) — it is never applied as a retrieval filter, so a question is still answered from the whole archive even while the chip is present.
 - Every chat message still counts as one request against the existing per-IP/global-daily rate limiter — no special-casing for messages that are part of a conversation.
 - Citations must never appear before the full response passes existing server-side citation verification; a confident-tier answer streams token-by-token, but citations attach only once verification completes. Clarify- and refuse-tier responses are code-generated, non-streamed, and instant (no LLM call).
 - Related-papers list must come from the same retrieval call already made for the question — no separate/secondary retrieval call to populate it.

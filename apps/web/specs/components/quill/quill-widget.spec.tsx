@@ -1,11 +1,26 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { QuillWidget } from '../../../src/components/quill/quill-widget';
+import { CHAT_HISTORY_SESSION_KEY, QuillWidget } from '../../../src/components/quill/quill-widget';
+import { AnnouncePaperContext } from '../../../src/components/quill/announce-paper-context';
+import { PaperContextProvider } from '../../../src/components/quill/paper-context';
 import {
   buildAskStreamBody,
   mockAskFetchRejects,
   mockAskFetchStream,
   readAllAskStreamEvents,
 } from './ask-stream-test-helpers';
+
+/** Two sequential streamed responses -- `mockAskFetchStream` shares one already-consumed body
+ *  across every call, which breaks a second real ask in the same test; this instead resolves a
+ *  fresh `buildAskStreamBody` fixture per call, in order. */
+function mockAskFetchStreamSequence(
+  responses: Array<Parameters<typeof buildAskStreamBody>[0]>,
+) {
+  const fetchMock = jest.fn();
+  for (const events of responses) {
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, body: buildAskStreamBody(events) });
+  }
+  global.fetch = fetchMock as unknown as typeof fetch;
+}
 
 /**
  * QuillWidget (Story 5.1) owns `isOpen`/`messages` and renders QuillLauncher/QuillPanel --
@@ -263,6 +278,581 @@ describe('QuillWidget', () => {
       expect((screen.getByRole('button', { name: 'Send question' }) as HTMLButtonElement).disabled).toBe(
         false,
       );
+    });
+  });
+
+  describe('sessionStorage persistence (Story 5.2)', () => {
+    it('restores a settled conversation from sessionStorage on mount', async () => {
+      window.sessionStorage.setItem(
+        CHAT_HISTORY_SESSION_KEY,
+        JSON.stringify([
+          { id: 'q-1', role: 'question', text: 'Why checks and balances?' },
+          {
+            id: 'a-1',
+            role: 'answer',
+            status: 'done',
+            text: 'Ambition must counteract ambition.',
+            citations: [],
+            confidence: 'high',
+            insufficientEvidence: false,
+          },
+        ]),
+      );
+
+      await openPanel();
+
+      expect(screen.getByText('Why checks and balances?')).toBeTruthy();
+      expect(screen.getByText('Ambition must counteract ambition.')).toBeTruthy();
+    });
+
+    it('downgrades a restored streaming message to connection-lost, not a stuck cursor', async () => {
+      window.sessionStorage.setItem(
+        CHAT_HISTORY_SESSION_KEY,
+        JSON.stringify([
+          { id: 'q-1', role: 'question', text: 'Why checks and balances?' },
+          {
+            id: 'a-1',
+            role: 'answer',
+            status: 'streaming',
+            text: 'Ambition must',
+            citations: [],
+            confidence: null,
+            insufficientEvidence: false,
+          },
+        ]),
+      );
+
+      await openPanel();
+
+      expect(screen.getByText('Connection lost — try asking again.')).toBeTruthy();
+      // Partial text stays visible.
+      expect(screen.getByText(/Ambition must/)).toBeTruthy();
+      expect(screen.queryByText('streaming…')).toBeNull();
+    });
+
+    it('a brand-new session (nothing in sessionStorage) starts with an empty conversation', async () => {
+      await openPanel();
+
+      expect(
+        screen.getByText('Ask a question about the Federalist Papers.'),
+      ).toBeTruthy();
+    });
+
+    it('falls back to an empty conversation when the stored payload is not an array', async () => {
+      window.sessionStorage.setItem(CHAT_HISTORY_SESSION_KEY, JSON.stringify({ foo: 1 }));
+
+      await openPanel();
+
+      expect(
+        screen.getByText('Ask a question about the Federalist Papers.'),
+      ).toBeTruthy();
+    });
+
+    it('drops individually malformed elements from a stored array rather than rejecting the whole restore', async () => {
+      window.sessionStorage.setItem(
+        CHAT_HISTORY_SESSION_KEY,
+        JSON.stringify([
+          {},
+          { id: 'q-1', role: 'question', text: 'Why checks and balances?' },
+        ]),
+      );
+
+      await openPanel();
+
+      // The malformed `{}` element is silently dropped, but the well-formed question beside it
+      // still restores -- a single bad entry (e.g. a future version-skewed shape) doesn't cost
+      // the rest of a real conversation.
+      expect(screen.getByText('Why checks and balances?')).toBeTruthy();
+    });
+
+    it('does not write to sessionStorage while an answer is still streaming, only once it settles', async () => {
+      mockAskFetchStream([
+        { type: 'token', text: 'Ambition ' },
+        {
+          type: 'done',
+          answer: 'Ambition must counteract ambition.',
+          citations: [],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      await openPanel();
+      // Captured before the question is asked -- the initial mount's own write-through effect
+      // (an empty conversation) has already run by this point, so this is the real "nothing new
+      // persisted yet" baseline to compare against, not an assumed `null`.
+      const preQuestionRaw = window.sessionStorage.getItem(CHAT_HISTORY_SESSION_KEY);
+
+      await askQuestion('Why checks and balances?');
+
+      await waitFor(() => {
+        expect(screen.getByText('streaming…')).toBeTruthy();
+      });
+      // Mid-stream: sessionStorage must be byte-for-byte unchanged from before the question was
+      // asked -- the skip-while-streaming guard means the question-appended, still-streaming
+      // state is never written at all, not just written without literally the word "streaming".
+      const midStreamRaw = window.sessionStorage.getItem(CHAT_HISTORY_SESSION_KEY);
+      expect(midStreamRaw).toBe(preQuestionRaw);
+
+      await waitFor(() => {
+        expect(screen.queryByText('streaming…')).toBeNull();
+      });
+      const settledRaw = window.sessionStorage.getItem(CHAT_HISTORY_SESSION_KEY);
+      expect(settledRaw).toContain('"status":"done"');
+      expect(settledRaw).toContain('Ambition must counteract ambition.');
+    });
+
+    it('survives a simulated reload (unmount + remount) with the settled conversation intact', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'Ambition must counteract ambition.',
+          citations: [],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      const { unmount } = render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      await askQuestion('Why checks and balances?');
+
+      await waitFor(() => {
+        expect(screen.getByText('Ambition must counteract ambition.')).toBeTruthy();
+      });
+
+      unmount();
+
+      // A fresh mount (simulating a hard reload in the same tab) reads the same sessionStorage.
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      expect(screen.getByText('Why checks and balances?')).toBeTruthy();
+      expect(screen.getByText('Ambition must counteract ambition.')).toBeTruthy();
+    });
+  });
+
+  describe('page-aware context chip (Story 5.2)', () => {
+    function renderWithPaper(paperNumber: number, title: string) {
+      return render(
+        <PaperContextProvider>
+          <AnnouncePaperContext paperNumber={paperNumber} title={title} />
+          <QuillWidget />
+        </PaperContextProvider>,
+      );
+    }
+
+    it('shows no chip when opened outside any Paper Reader page (e.g. Homepage/Browse Papers)', async () => {
+      await openPanel();
+
+      expect(screen.queryByLabelText('Remove paper context')).toBeNull();
+    });
+
+    it('shows a removable chip titled from the announced paper when opened on a Paper Reader page', async () => {
+      renderWithPaper(51, 'The Structure of the Government');
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      expect(
+        screen.getByText(/Federalist No\. 51 — The Structure of the Government/),
+      ).toBeTruthy();
+      expect(screen.getByLabelText('Remove paper context')).toBeTruthy();
+    });
+
+    it('includes paperNumber and paperTitle in the /api/ask request body while the chip is present', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'Ambition must counteract ambition.',
+          citations: [],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      renderWithPaper(51, 'The Structure of the Government');
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      await askQuestion('Why checks and balances?');
+
+      await waitFor(() => {
+        expect(screen.getByText('Ambition must counteract ambition.')).toBeTruthy();
+      });
+      const [, requestInit] = (global.fetch as jest.Mock).mock.calls[0];
+      // Sent as prompt context for the LLM (product-corrected 2026-09-02) -- apps/api never
+      // applies these as a retrieval filter; see ask.service.spec.ts for that guarantee.
+      expect(JSON.parse(requestInit.body)).toEqual({
+        question: 'Why checks and balances?',
+        paperNumber: 51,
+        paperTitle: 'The Structure of the Government',
+      });
+    });
+
+    it('removes the chip on dismiss, and the next question omits paperNumber/paperTitle from the request body', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'Ambition must counteract ambition.',
+          citations: [],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      renderWithPaper(51, 'The Structure of the Government');
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      fireEvent.click(screen.getByLabelText('Remove paper context'));
+      expect(screen.queryByLabelText('Remove paper context')).toBeNull();
+
+      await askQuestion('Why checks and balances?');
+      await waitFor(() => {
+        expect(screen.getByText('Ambition must counteract ambition.')).toBeTruthy();
+      });
+      const [, requestInit] = (global.fetch as jest.Mock).mock.calls[0];
+      expect(JSON.parse(requestInit.body)).toEqual({ question: 'Why checks and balances?' });
+    });
+
+    it('does not reappear while remaining on the same paper after dismissal', async () => {
+      const { rerender } = render(
+        <PaperContextProvider>
+          <AnnouncePaperContext paperNumber={51} title="The Structure of the Government" />
+          <QuillWidget />
+        </PaperContextProvider>,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      fireEvent.click(screen.getByLabelText('Remove paper context'));
+      expect(screen.queryByLabelText('Remove paper context')).toBeNull();
+
+      // Re-rendering with the same paperNumber (e.g. some unrelated state update on the same
+      // page) must not resurrect the chip.
+      rerender(
+        <PaperContextProvider>
+          <AnnouncePaperContext paperNumber={51} title="The Structure of the Government" />
+          <QuillWidget />
+        </PaperContextProvider>,
+      );
+
+      expect(screen.queryByLabelText('Remove paper context')).toBeNull();
+    });
+
+    it('re-evaluates fresh and reappears when navigating from dismissed paper N to a different paper M', async () => {
+      const { rerender } = render(
+        <PaperContextProvider>
+          <AnnouncePaperContext paperNumber={51} title="The Structure of the Government" />
+          <QuillWidget />
+        </PaperContextProvider>,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      fireEvent.click(screen.getByLabelText('Remove paper context'));
+      expect(screen.queryByLabelText('Remove paper context')).toBeNull();
+
+      rerender(
+        <PaperContextProvider>
+          <AnnouncePaperContext paperNumber={10} title="Federalist No. 10" />
+          <QuillWidget />
+        </PaperContextProvider>,
+      );
+
+      expect(screen.getByText(/Federalist No\. 10/)).toBeTruthy();
+      expect(screen.getByLabelText('Remove paper context')).toBeTruthy();
+    });
+
+    it('reappears on a fresh arrival at the same paper N after navigating away and back', async () => {
+      // A conditional first child (rather than omitting the element entirely) keeps QuillWidget
+      // at a stable position across rerenders -- in the real app, QuillWidget is a layout-level
+      // sibling of `{children}` that never remounts as pages inside `children` come and go; if
+      // this test instead varied element *count* across rerenders, React would reconcile
+      // QuillWidget itself as a different position and remount it, silently invalidating the
+      // "does the widget's own state survive a real navigation" premise this test exists to check.
+      type Scene = { paper: { paperNumber: number; title: string } | null };
+      function Scene({ paper }: Scene) {
+        return (
+          <PaperContextProvider>
+            {paper && <AnnouncePaperContext paperNumber={paper.paperNumber} title={paper.title} />}
+            <QuillWidget />
+          </PaperContextProvider>
+        );
+      }
+
+      const { rerender } = render(
+        <Scene paper={{ paperNumber: 51, title: 'The Structure of the Government' }} />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      fireEvent.click(screen.getByLabelText('Remove paper context'));
+      expect(screen.queryByLabelText('Remove paper context')).toBeNull();
+
+      // Navigate away to a non-paper page (no AnnouncePaperContext rendered)...
+      rerender(<Scene paper={null} />);
+      expect(screen.queryByLabelText('Remove paper context')).toBeNull();
+
+      // ...then back to the same paper N -- a fresh arrival, not "remaining on that page".
+      rerender(
+        <Scene paper={{ paperNumber: 51, title: 'The Structure of the Government' }} />,
+      );
+
+      expect(screen.getByLabelText('Remove paper context')).toBeTruthy();
+    });
+  });
+
+  // spec-conversation-history-context.md: the panel sends the entire prior conversation with
+  // every ask so a follow-up ("compare and contrast these two papers") can be understood in
+  // context, and provides a "Clear chat" control resetting both the in-memory conversation and
+  // its sessionStorage persistence.
+  describe('conversation history (spec-conversation-history-context.md)', () => {
+    it('sends no history field on the first question of a session', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'No. 6 and No. 8 are similar.',
+          citations: [],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      await openPanel();
+      await askQuestion('Which paper is most similar to No. 6?');
+
+      await waitFor(() => {
+        expect(screen.getByText('No. 6 and No. 8 are similar.')).toBeTruthy();
+      });
+      const [, requestInit] = (global.fetch as jest.Mock).mock.calls[0];
+      expect(JSON.parse(requestInit.body)).toEqual({
+        question: 'Which paper is most similar to No. 6?',
+      });
+    });
+
+    it('sends the entire prior settled conversation, oldest first, on a follow-up question', async () => {
+      mockAskFetchStreamSequence([
+        [
+          {
+            type: 'done',
+            answer: 'No. 6 and No. 8 are similar.',
+            citations: [],
+            confidence: 'high',
+            insufficientEvidence: false,
+          },
+        ],
+        [
+          {
+            type: 'done',
+            answer: 'They both discuss the dangers of disunion.',
+            citations: [],
+            confidence: 'high',
+            insufficientEvidence: false,
+          },
+        ],
+      ]);
+
+      await openPanel();
+      await askQuestion('Which paper is most similar to No. 6?');
+      await waitFor(() => {
+        expect(screen.getByText('No. 6 and No. 8 are similar.')).toBeTruthy();
+      });
+
+      await askQuestion('Can you compare and contrast these two papers?');
+      await waitFor(() => {
+        expect(screen.getByText('They both discuss the dangers of disunion.')).toBeTruthy();
+      });
+
+      const [, secondRequestInit] = (global.fetch as jest.Mock).mock.calls[1];
+      const secondBody = JSON.parse(secondRequestInit.body);
+      expect(secondBody.question).toBe('Can you compare and contrast these two papers?');
+      expect(secondBody.history).toEqual([
+        { question: 'Which paper is most similar to No. 6?', answer: 'No. 6 and No. 8 are similar.' },
+      ]);
+    });
+
+    it('excludes a connection-lost turn from the history sent with the next question', async () => {
+      mockAskFetchStreamSequence([
+        // No `done` event -- the reader loop exhausts and the panel marks this turn
+        // connection-lost.
+        [{ type: 'token', text: 'Ambition ' }],
+        [
+          {
+            type: 'done',
+            answer: 'A fresh answer with no prior context.',
+            citations: [],
+            confidence: 'high',
+            insufficientEvidence: false,
+          },
+        ],
+      ]);
+
+      await openPanel();
+      await askQuestion('Why checks and balances?');
+      await waitFor(() => {
+        expect(screen.getByText('Connection lost — try asking again.')).toBeTruthy();
+      });
+
+      await askQuestion('A second question.');
+      await waitFor(() => {
+        expect(screen.getByText('A fresh answer with no prior context.')).toBeTruthy();
+      });
+
+      const [, secondRequestInit] = (global.fetch as jest.Mock).mock.calls[1];
+      const secondBody = JSON.parse(secondRequestInit.body);
+      expect(secondBody.history ?? []).toEqual([]);
+    });
+
+    // Bug found in review (2026-09-05): a `done` answer with `insufficientEvidence: true` (refuse
+    // tier, clarify tier, or the fail-safe-to-refuse outcome behind CONTEXT_LENGTH_EXCEEDED_MESSAGE)
+    // is not a genuine grounded answer -- feeding it back into the next request's history would be
+    // actively harmful, especially for the context-length case (re-sending the very refusal that
+    // said "this conversation has grown too long" would only grow the next request further and
+    // reproduce the same failure).
+    it('excludes a done-but-insufficient-evidence turn from the history sent with the next question', async () => {
+      mockAskFetchStreamSequence([
+        [
+          {
+            type: 'done',
+            answer:
+              "I couldn't find sufficient evidence in the Federalist Papers to answer that confidently.",
+            citations: [],
+            confidence: 'low',
+            insufficientEvidence: true,
+          },
+        ],
+        [
+          {
+            type: 'done',
+            answer: 'A fresh answer with no prior context.',
+            citations: [],
+            confidence: 'high',
+            insufficientEvidence: false,
+          },
+        ],
+      ]);
+
+      await openPanel();
+      await askQuestion('What is the best pizza topping?');
+      await waitFor(() => {
+        expect(
+          screen.getByText(
+            "I couldn't find sufficient evidence in the Federalist Papers to answer that confidently.",
+          ),
+        ).toBeTruthy();
+      });
+
+      await askQuestion('A second question.');
+      await waitFor(() => {
+        expect(screen.getByText('A fresh answer with no prior context.')).toBeTruthy();
+      });
+
+      const [, secondRequestInit] = (global.fetch as jest.Mock).mock.calls[1];
+      const secondBody = JSON.parse(secondRequestInit.body);
+      expect(secondBody.history ?? []).toEqual([]);
+    });
+
+    it('includes both paperNumber/paperTitle and history together when both apply', async () => {
+      mockAskFetchStreamSequence([
+        [
+          {
+            type: 'done',
+            answer: 'No. 6 and No. 8 are similar.',
+            citations: [],
+            confidence: 'high',
+            insufficientEvidence: false,
+          },
+        ],
+        [
+          {
+            type: 'done',
+            answer: 'They compare favorably.',
+            citations: [],
+            confidence: 'high',
+            insufficientEvidence: false,
+          },
+        ],
+      ]);
+
+      renderWithPaperHelper();
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      await askQuestion('Which paper is most similar to No. 6?');
+      await waitFor(() => {
+        expect(screen.getByText('No. 6 and No. 8 are similar.')).toBeTruthy();
+      });
+
+      await askQuestion('Can you compare and contrast these two papers?');
+      await waitFor(() => {
+        expect(screen.getByText('They compare favorably.')).toBeTruthy();
+      });
+
+      const [, secondRequestInit] = (global.fetch as jest.Mock).mock.calls[1];
+      const secondBody = JSON.parse(secondRequestInit.body);
+      expect(secondBody.paperNumber).toBe(51);
+      expect(secondBody.paperTitle).toBe('The Structure of the Government');
+      expect(secondBody.history).toEqual([
+        { question: 'Which paper is most similar to No. 6?', answer: 'No. 6 and No. 8 are similar.' },
+      ]);
+    });
+
+    function renderWithPaperHelper() {
+      return render(
+        <PaperContextProvider>
+          <AnnouncePaperContext paperNumber={51} title="The Structure of the Government" />
+          <QuillWidget />
+        </PaperContextProvider>,
+      );
+    }
+  });
+
+  describe('"Clear chat" control (spec-conversation-history-context.md)', () => {
+    it('is visible whenever the panel is open', async () => {
+      await openPanel();
+
+      expect(screen.getByRole('button', { name: 'Clear chat' })).toBeTruthy();
+    });
+
+    it('resets both the visible conversation and sessionStorage in one action, even mid-stream', async () => {
+      mockAskFetchStream([{ type: 'token', text: 'Ambition ' }]);
+
+      await openPanel();
+      await askQuestion('Why checks and balances?');
+      await waitFor(() => {
+        expect(screen.getByText('streaming…')).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Clear chat' }));
+
+      expect(screen.queryByText('Why checks and balances?')).toBeNull();
+      expect(
+        screen.getByText('Ask a question about the Federalist Papers.'),
+      ).toBeTruthy();
+      await waitFor(() => {
+        expect(window.sessionStorage.getItem(CHAT_HISTORY_SESSION_KEY)).not.toContain(
+          'Why checks and balances?',
+        );
+      });
+    });
+
+    it('conversation does not reappear after a simulated reload once cleared', async () => {
+      mockAskFetchStream([
+        {
+          type: 'done',
+          answer: 'Ambition must counteract ambition.',
+          citations: [],
+          confidence: 'high',
+          insufficientEvidence: false,
+        },
+      ]);
+
+      const { unmount } = render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      await askQuestion('Why checks and balances?');
+      await waitFor(() => {
+        expect(screen.getByText('Ambition must counteract ambition.')).toBeTruthy();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Clear chat' }));
+      unmount();
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      expect(screen.queryByText('Why checks and balances?')).toBeNull();
+      expect(
+        screen.getByText('Ask a question about the Federalist Papers.'),
+      ).toBeTruthy();
     });
   });
 });
