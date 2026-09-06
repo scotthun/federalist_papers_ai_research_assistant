@@ -461,6 +461,7 @@ export function QuillPanel({
               key={message.id}
               message={message}
               onCitationClick={onCollapse}
+              onClearChat={handleClearChat}
               onRetry={handleRetry}
               retryDisabled={isStreaming}
             />
@@ -504,6 +505,40 @@ function QuestionBubble({ text }: { text: string }) {
   );
 }
 
+/**
+ * Renders `text` as plain text, except any literal occurrence of `"Clear chat"` becomes a real
+ * clickable trigger for `onClearChat` (spec-chat-nice-to-haves.md) -- apps/api's
+ * `CONTEXT_LENGTH_EXCEEDED_MESSAGE` is the only answer text that ever contains this exact phrase,
+ * telling the user to `use "Clear chat" to start a new conversation`; without this, that
+ * instruction only works if the user separately spots and clicks the header's own "Clear chat"
+ * button, rather than the one place the app is actually telling them what to do. Matched by the
+ * literal phrase rather than by comparing the whole message against that constant (which apps/web
+ * can't import from apps/api across the app boundary) -- robust to that message's exact wording
+ * changing elsewhere as long as it still names this same phrase.
+ */
+function renderAnswerText(text: string, onClearChat: () => void) {
+  const marker = '"Clear chat"';
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex === -1) {
+    return text;
+  }
+  const before = text.slice(0, markerIndex);
+  const after = text.slice(markerIndex + marker.length);
+  return (
+    <>
+      {before}
+      <button
+        type="button"
+        onClick={onClearChat}
+        className="rounded px-0.5 font-medium text-quill-accent underline decoration-dotted hover:bg-quill-surface-highlight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold"
+      >
+        {marker}
+      </button>
+      {after}
+    </>
+  );
+}
+
 /** How long a message stays `streaming` before its caption switches from "streaming…" to a
  *  longer-wait notice (spec-chat-error-recovery-polish.md) -- the confident tier's whole answer is
  *  already fully generated *before* the first token ever streams (ask-stream.ts's own doc
@@ -515,11 +550,13 @@ export const LONG_WAIT_NOTICE_DELAY_MS = 15_000;
 function AnswerBubble({
   message,
   onCitationClick,
+  onClearChat,
   onRetry,
   retryDisabled,
 }: {
   message: Extract<QuillMessage, { role: 'answer' }>;
   onCitationClick: () => void;
+  onClearChat: () => void;
   onRetry: (answerId: string) => void;
   /** True while any request (a fresh send, or another message's retry) is already in flight --
    *  mirrors the main send control's own disabled state, so Retry can never itself trigger the
@@ -558,7 +595,7 @@ function AnswerBubble({
         className="quill-answer-bubble-shape max-w-[90%] border border-quill-border-hairline bg-quill-surface-raised px-3 py-2 text-sm text-quill-ink-primary"
       >
         <p>
-          {message.text}
+          {message.status === 'done' ? renderAnswerText(message.text, onClearChat) : message.text}
           {isStreaming && (
             <span aria-hidden="true" className="ml-0.5 inline-block animate-pulse">
               ▍
@@ -591,7 +628,7 @@ function AnswerBubble({
         )}
 
         {message.status === 'done' && message.citations.length > 0 && (
-          <ul className="mt-2 space-y-1">
+          <ul className="quill-citations-fade-in mt-2 space-y-1">
             {message.citations.map((citation, index) => (
               <li key={`${citation.chunkId}-${index}`}>
                 <Link

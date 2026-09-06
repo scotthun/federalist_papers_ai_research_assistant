@@ -91,6 +91,14 @@
   .quill-pulse-once {
     animation: quill-pulse-once 1.4s ease-out 1;
   }
+
+  /* Citations mount all at once the instant an answer reaches `done` (spec-chat-nice-to-haves.md)
+   * -- easy to miss below a long answer that's already stopped looking "active." A brief
+   * fade/slide-in on that one mount gives it a visible arrival cue without being a distracting
+   * looping/attention-grabbing animation (`1` iteration, like `quill-pulse-once` above). */
+  .quill-citations-fade-in {
+    animation: quill-citations-fade-in 0.3s ease-out 1;
+  }
 }
 
 @keyframes quill-pulse-once {
@@ -102,5 +110,16 @@
   }
   100% {
     box-shadow: 0 0 0 6px rgba(201, 162, 39, 0.25);
+  }
+}
+
+@keyframes quill-citations-fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
