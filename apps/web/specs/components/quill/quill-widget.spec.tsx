@@ -1,5 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { CHAT_HISTORY_SESSION_KEY, QuillWidget } from '../../../src/components/quill/quill-widget';
+import { LONG_WAIT_NOTICE_DELAY_MS } from '../../../src/components/quill/quill-panel';
 import { AnnouncePaperContext } from '../../../src/components/quill/announce-paper-context';
 import { PaperContextProvider } from '../../../src/components/quill/paper-context';
 import {
@@ -49,6 +50,7 @@ describe('QuillWidget', () => {
     global.fetch = originalFetch;
     window.sessionStorage.clear();
     jest.resetAllMocks();
+    jest.useRealTimers();
   });
 
   // A fixture sanity check, not a component test: proves the shared `buildAskStreamBody` fixture
@@ -414,6 +416,143 @@ describe('QuillWidget', () => {
     });
     const sendButton = screen.getByRole('button', { name: 'Send question' });
     expect((sendButton as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  // spec-chat-error-recovery-polish.md
+  describe('Retry after connection lost', () => {
+    it('resends the same question in place when Retry is clicked, without duplicating the question bubble', async () => {
+      const fetchMock = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          body: buildAskStreamBody([
+            {
+              type: 'done',
+              answer: 'Ambition must counteract ambition.',
+              citations: [],
+              confidence: 'high',
+              insufficientEvidence: false,
+            },
+          ]),
+        });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await openPanel();
+      await askQuestion('Why checks and balances?');
+
+      await waitFor(() => {
+        expect(screen.getByText('Connection lost — try asking again.')).toBeTruthy();
+      });
+      expect(screen.getAllByText('Why checks and balances?')).toHaveLength(1);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Ambition must counteract ambition.')).toBeTruthy();
+      });
+      // Still exactly one question bubble -- the retry resent the same turn in place rather than
+      // appending a new question/answer pair.
+      expect(screen.getAllByText('Why checks and balances?')).toHaveLength(1);
+      expect(screen.queryByText('Connection lost — try asking again.')).toBeNull();
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const retryCallBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+      expect(retryCallBody.question).toBe('Why checks and balances?');
+    });
+
+    it('disables Retry while another request is already in flight', async () => {
+      const fetchMock = jest.fn();
+      fetchMock.mockRejectedValueOnce(new Error('network down'));
+      let resolveSecond: ((value: unknown) => void) | undefined;
+      fetchMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      await openPanel();
+      await askQuestion('First question?');
+      await waitFor(() => {
+        expect(screen.getByText('Connection lost — try asking again.')).toBeTruthy();
+      });
+
+      await askQuestion('Second question?');
+
+      await waitFor(() => {
+        expect((screen.getByRole('button', { name: 'Retry' }) as HTMLButtonElement).disabled).toBe(
+          true,
+        );
+      });
+
+      // Clicking a disabled Retry must not resend anything -- still only the 2 calls so far.
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      // Let the still-pending second request settle so nothing leaks into the next test.
+      resolveSecond?.({
+        ok: true,
+        status: 200,
+        body: buildAskStreamBody([
+          {
+            type: 'done',
+            answer: 'Answer.',
+            citations: [],
+            confidence: 'high',
+            insufficientEvidence: false,
+          },
+        ]),
+      });
+    });
+  });
+
+  // spec-chat-error-recovery-polish.md
+  describe('Long-wait streaming notice', () => {
+    it('switches from "streaming…" to a longer-wait notice only after LONG_WAIT_NOTICE_DELAY_MS, never before', async () => {
+      jest.useFakeTimers();
+      // Never resolves -- keeps the message in `streaming` status indefinitely, so only this
+      // test's own fake-timer advances (not buildAskStreamBody's internal per-chunk delay) drive
+      // the long-wait timer under test.
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: () =>
+              new Promise(() => {
+                // Deliberately never resolves -- keeps the message in `streaming` indefinitely.
+              }),
+          }),
+        },
+      }) as unknown as typeof fetch;
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      const input = screen.getByLabelText('Ask a question about the Federalist Papers');
+      fireEvent.change(input, { target: { value: 'Why factions?' } });
+      const form = input.closest('form') as HTMLFormElement;
+      await act(async () => {
+        fireEvent.submit(form);
+      });
+
+      expect(screen.getByText('streaming…')).toBeTruthy();
+
+      await act(async () => {
+        jest.advanceTimersByTime(LONG_WAIT_NOTICE_DELAY_MS - 1000);
+      });
+      expect(screen.getByText('streaming…')).toBeTruthy();
+      expect(screen.queryByText(/Still working/)).toBeNull();
+
+      await act(async () => {
+        jest.advanceTimersByTime(1000);
+      });
+      expect(
+        screen.getByText('Still working — this is taking longer than usual…'),
+      ).toBeTruthy();
+    });
   });
 
   it('disables the send control while a response is streaming, preventing a duplicate in-flight request', async () => {
