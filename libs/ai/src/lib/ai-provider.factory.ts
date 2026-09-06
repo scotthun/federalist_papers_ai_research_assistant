@@ -1,5 +1,6 @@
 import type { EmbeddingProvider, GenerationProvider } from './ai-provider.interface';
 import { GeminiProvider } from './providers/gemini.provider';
+import { GroqProvider } from './providers/groq.provider';
 import { OpenRouterProvider } from './providers/openrouter.provider';
 
 /**
@@ -71,9 +72,23 @@ export function createGenerationProvider(
       const model = env['OPENROUTER_MODEL'];
       return new OpenRouterProvider({ apiKey, model });
     }
+    case 'groq': {
+      const apiKey = env['GROQ_API_KEY'];
+      if (!apiKey) {
+        throw new Error(
+          'AI_PROVIDER is "groq" but GROQ_API_KEY is not set. Set GROQ_API_KEY in the environment (see .env.example).',
+        );
+      }
+      // Optional -- GroqProvider falls back to its own default free model
+      // (openai/gpt-oss-120b) when unset (see GROQ_MODEL in .env.example). Lets Groq's
+      // free-model catalog changing, or a specific model's live unavailability, be worked
+      // around by restarting with a different env value, not by editing source.
+      const model = env['GROQ_MODEL'];
+      return new GroqProvider({ apiKey, model });
+    }
     default:
       throw new Error(
-        `Unknown AI_PROVIDER "${provider}". Supported providers: gemini, openrouter.`,
+        `Unknown AI_PROVIDER "${provider}". Supported providers: gemini, openrouter, groq.`,
       );
   }
 }
