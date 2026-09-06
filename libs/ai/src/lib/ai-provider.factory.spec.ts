@@ -11,8 +11,15 @@ jest.mock('@langchain/openai', () => ({
   ChatOpenAI: openAiChatModelCtor,
 }));
 
+const groqChatModelCtor = jest.fn().mockImplementation(() => ({}));
+
+jest.mock('@langchain/groq', () => ({
+  ChatGroq: groqChatModelCtor,
+}));
+
 import { createEmbeddingProvider, createGenerationProvider } from './ai-provider.factory';
 import { GeminiProvider } from './providers/gemini.provider';
+import { GroqProvider } from './providers/groq.provider';
 import { OpenRouterProvider } from './providers/openrouter.provider';
 
 describe('createEmbeddingProvider', () => {
@@ -137,6 +144,57 @@ describe('createGenerationProvider', () => {
         expect.objectContaining({
           apiKey: 'or-key',
           configuration: { baseURL: 'https://openrouter.ai/api/v1' },
+          maxRetries: 0,
+        }),
+      );
+    });
+  });
+
+  describe('groq', () => {
+    it('returns a GroqProvider when AI_PROVIDER=groq', () => {
+      const provider = createGenerationProvider({
+        AI_PROVIDER: 'groq',
+        GROQ_API_KEY: 'groq-key',
+      });
+      expect(provider).toBeInstanceOf(GroqProvider);
+    });
+
+    it('throws a clear error naming GROQ_API_KEY when it is missing', () => {
+      expect(() => createGenerationProvider({ AI_PROVIDER: 'groq' })).toThrow(/GROQ_API_KEY/);
+    });
+
+    it("constructs ChatGroq with GroqProvider's own default model when GROQ_MODEL is unset", () => {
+      createGenerationProvider({
+        AI_PROVIDER: 'groq',
+        GROQ_API_KEY: 'groq-key',
+      });
+
+      expect(groqChatModelCtor).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'openai/gpt-oss-120b' }),
+      );
+    });
+
+    it('passes GROQ_MODEL through to the underlying chat model when set', () => {
+      createGenerationProvider({
+        AI_PROVIDER: 'groq',
+        GROQ_API_KEY: 'groq-key',
+        GROQ_MODEL: 'llama-3.3-70b-versatile',
+      });
+
+      expect(groqChatModelCtor).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'llama-3.3-70b-versatile' }),
+      );
+    });
+
+    it('constructs ChatGroq with the given API key and maxRetries: 0', () => {
+      createGenerationProvider({
+        AI_PROVIDER: 'groq',
+        GROQ_API_KEY: 'groq-key',
+      });
+
+      expect(groqChatModelCtor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKey: 'groq-key',
           maxRetries: 0,
         }),
       );
