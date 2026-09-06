@@ -64,9 +64,8 @@ flowchart TB
         Chunks[("document_chunks<br/>vector(3072) embeddings")]
     end
 
-    subgraph External["External AI providers"]
-        Gemini["Gemini<br/>(embeddings — always —<br/>+ default generation)"]
-        OpenRouter["OpenRouter<br/>(fallback generation provider)"]
+    subgraph External["External AI provider"]
+        Gemini["Gemini<br/>(embeddings + generation)"]
     end
 
     Browser --> Pages
@@ -86,7 +85,6 @@ flowchart TB
     Database --> Chunks
 
     Ai --> Gemini
-    Ai -.->|"AI_PROVIDER=openrouter"| OpenRouter
 
     Documents -->|"one-time ingestion"| Database
     Documents -->|"embed each chunk"| Ai
@@ -114,9 +112,10 @@ flowchart TB
 - **Frontend:** Next.js 16 (App Router), Tailwind CSS v4, shadcn/ui primitives
 - **Backend:** NestJS 11, TypeORM
 - **Database:** Postgres with the `pgvector` extension
-- **AI:** Gemini (embeddings + default generation), OpenRouter (fallback generation provider),
-  via `@langchain`-based adapters behind a shared `EmbeddingProvider`/`GenerationProvider`
-  interface (`libs/ai`) — swapping or adding a provider never touches call sites outside that lib
+- **AI:** Gemini, for both embeddings and generation, via a `@langchain`-based adapter behind a
+  `EmbeddingProvider`/`GenerationProvider` interface (`libs/ai`) — the abstraction exists so a
+  second provider could be swapped in without touching any call site outside that lib, though
+  Gemini is the only one actually in use
 - **Monorepo:** Nx
 
 ## Quickstart
