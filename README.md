@@ -33,6 +33,15 @@ stories rather than one large, undifferentiated commit.
 
 ## Architecture
 
+Two Mermaid diagrams below, each scoped to one user journey through the system: browsing/searching
+the already-ingested archive, and asking the chat widget a question. `libs/shared` (compile-time
+type sharing between `apps/web`/`apps/api`) is omitted from both — it carries no runtime request
+in either journey. Several nodes (`Browser`, `libs/retrieval`, `libs/ai`, `Gemini`,
+`document_chunks`) appear in both diagrams — they're the same real components, repeated so each
+journey reads standalone rather than sharing a cross-reference.
+
+### Browse & Search the Archive
+
 ```mermaid
 flowchart TB
     subgraph Client
@@ -41,22 +50,17 @@ flowchart TB
 
     subgraph Web["apps/web — Next.js (App Router)"]
         Pages["Browse / Search / Paper Reader pages"]
-        Quill["Quill chat widget<br/>(streaming Q&A panel)"]
-        AskRoute["/api/ask route handler<br/>(NDJSON streaming proxy)"]
     end
 
     subgraph Api["apps/api — NestJS"]
-        PapersController["PapersController<br/>/api/papers, /search, /search/semantic"]
-        AskController["AskController<br/>/api/ask"]
-        AskService["AskService<br/>retrieval → confidence tiering →<br/>generation → citation verification"]
+        PapersController["PapersController<br/>/api/papers, /search, /search/semantic, /:paperNumber"]
     end
 
     subgraph Libs["libs/*"]
         Retrieval["libs/retrieval<br/>pgvector cosine-similarity search"]
-        Ai["libs/ai<br/>EmbeddingProvider / GenerationProvider<br/>abstraction"]
+        Ai["libs/ai<br/>embedding half of the EmbeddingProvider/<br/>GenerationProvider abstraction"]
         Documents["libs/documents<br/>Avalon Project scraper + chunker"]
         Database["libs/database<br/>TypeORM entities + migrations"]
-        Shared["libs/shared<br/>types shared by web + api"]
     end
 
     subgraph Data["Postgres + pgvector"]
@@ -65,29 +69,83 @@ flowchart TB
     end
 
     subgraph External["External AI provider"]
-        Gemini["Gemini<br/>(embeddings + generation)"]
+        Gemini["Gemini<br/>(embeddings)"]
     end
 
     Browser --> Pages
-    Browser --> Quill
-    Quill --> AskRoute
-    AskRoute --> AskController
     Pages --> PapersController
 
-    AskController --> AskService
-    PapersController --> Retrieval
-    AskService --> Retrieval
-    AskService --> Ai
+    PapersController -->|"/search/semantic only"| Retrieval
+    PapersController --> Database
 
     Retrieval --> Database
-    PapersController --> Database
+    Retrieval --> Ai
+    Ai --> Gemini
+
     Database --> Papers
     Database --> Chunks
 
-    Ai --> Gemini
-
     Documents -->|"one-time ingestion"| Database
     Documents -->|"embed each chunk"| Ai
+```
+
+**Request flow for browsing/searching the archive:**
+
+1. The Browse Papers, Search, and Paper Reader pages all call `apps/api`'s `PapersController`,
+   which exposes `GET /api/papers` (full list), `GET /api/papers/search` (quick find by number/
+   author/title/keyword), `GET /api/papers/search/semantic` (semantic search), and
+   `GET /api/papers/:paperNumber` (one paper's full detail).
+2. `GET /api/papers`, `/search`, and `/:paperNumber` are direct relational queries against
+   `libs/database`. Only `/search/semantic` calls `libs/retrieval`, which embeds the query via
+   `libs/ai`/Gemini and runs a cosine-similarity search over `document_chunks`.
+3. All of this reads data that a one-time ingestion pipeline (`npm run ingest:federalist-papers`)
+   already populated: `libs/documents` scrapes and chunks the 85 papers from the Avalon Project,
+   each chunk is embedded via `libs/ai`, and both the paper records and their embedded chunks are
+   written to Postgres through `libs/database`. Ingestion never runs as part of a live request —
+   it's how the data got there in the first place.
+
+### Ask the Archive (chat widget)
+
+```mermaid
+flowchart TB
+    subgraph Client
+        Browser[Browser]
+    end
+
+    subgraph Web["apps/web — Next.js (App Router)"]
+        Quill["Quill chat widget<br/>(streaming Q&A panel)"]
+        AskRoute["/api/ask route handler<br/>(NDJSON streaming proxy)"]
+    end
+
+    subgraph Api["apps/api — NestJS"]
+        AskController["AskController<br/>/api/ask"]
+        AskService["AskService<br/>retrieval → confidence tiering →<br/>generation → citation verification"]
+    end
+
+    subgraph Libs["libs/*"]
+        Retrieval["libs/retrieval<br/>pgvector cosine-similarity search"]
+        Ai["libs/ai<br/>EmbeddingProvider / GenerationProvider<br/>abstraction"]
+    end
+
+    subgraph Data["Postgres + pgvector"]
+        Chunks[("document_chunks<br/>vector(3072) embeddings")]
+    end
+
+    subgraph External["External AI provider"]
+        Gemini["Gemini<br/>(embeddings + generation)"]
+    end
+
+    Browser --> Quill
+    Quill --> AskRoute
+    AskRoute --> AskController
+    AskController --> AskService
+
+    AskService --> Retrieval
+    AskService -->|"generation only"| Ai
+
+    Retrieval --> Chunks
+    Retrieval --> Ai
+    Ai --> Gemini
 ```
 
 **Request flow for a question asked in the chat widget:**
