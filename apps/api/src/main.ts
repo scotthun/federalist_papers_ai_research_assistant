@@ -72,7 +72,16 @@ async function bootstrap() {
 
 // Guarded the same way ingest.ts guards its real run -- importing this module (e.g. main.spec.ts
 // importing `parsePort`) must not itself trigger a real Nest bootstrap / DB connection attempt.
-if (require.main === module) {
+//
+// `require.main === module` alone isn't reliable inside Vercel's Function runtime (confirmed
+// live, Story 4.1 deploy walkthrough): the webpack-bundled `dist/apps/api/main.js`, when
+// `require()`'d by `api/[[...path]].js`'s serverless entrypoint, still satisfied this check and
+// ran `bootstrap()` a second time on every request -- and since a Function has no `PORT` to bind
+// (it was also an empty-string env var, so `parsePort` threw), the resulting rejection's
+// `process.exit(1)` killed the entire Function instance mid-request, not just the errant listener.
+// `process.env.VERCEL` is a Vercel-set system env var (undefined everywhere else), so it reliably
+// suppresses the auto-listen path regardless of that require.main ambiguity.
+if (require.main === module && !process.env.VERCEL) {
   bootstrap().catch((err) => {
     Logger.error(err);
     process.exit(1);
