@@ -1,4 +1,10 @@
 import 'reflect-metadata';
+// TypeORM's postgres driver loads `pg` via a dynamic `require(name)` (PlatformTools.load) --
+// invisible to Vercel's static file-tracer, so `pg` never made it into the deployed Function even
+// though it's a real dependency that works fine locally (confirmed live: DriverPackageNotInstalledError
+// at runtime, Story 4.1 deploy walkthrough). This static, literal import makes the tracer bundle
+// `pg` for real, so TypeORM's own dynamic require finds it already on disk at runtime.
+import 'pg';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import { InitSchema1787627139314 } from '../migrations/1787627139314-InitSchema';
 import { Author } from './entities/author.entity';
