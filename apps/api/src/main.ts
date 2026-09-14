@@ -45,22 +45,29 @@ export function resolveCorsOrigin(
   return trimmed;
 }
 
-async function bootstrap() {
+/**
+ * Split out from `bootstrap()` so Vercel's serverless entrypoint (`api/index.js`, Story 4.1
+ * deploy walkthrough) can build the same configured Nest app without also binding a port --
+ * Vercel's Node runtime owns the request lifecycle for a Function, not `app.listen()`.
+ */
+export async function createApp() {
   const app = await NestFactory.create(AppModule);
-  const globalPrefix = 'api';
-  app.setGlobalPrefix(globalPrefix);
+  app.setGlobalPrefix('api');
   const corsOrigin = resolveCorsOrigin(process.env);
   if (corsOrigin) {
     app.enableCors({ origin: corsOrigin });
   }
+  return app;
+}
+
+async function bootstrap() {
+  const app = await createApp();
   // Default moved off 3000 (Story 1.3) -- identical to Next.js's own dev-server default, and
   // apps/web + apps/api now run concurrently for real cross-app HTTP calls. Still overridable
   // via PORT.
   const port = parsePort(process.env, 3333);
   await app.listen(port);
-  Logger.log(
-    `🚀 Application is running on: http://localhost:${port}/${globalPrefix}`,
-  );
+  Logger.log(`🚀 Application is running on: http://localhost:${port}/api`);
 }
 
 // Guarded the same way ingest.ts guards its real run -- importing this module (e.g. main.spec.ts
