@@ -27,3 +27,12 @@ module.exports = async (req, res) => {
   }
   return cachedHandler(req, res);
 };
+
+// Plain (non-Next.js) Vercel Functions default to a short duration ceiling regardless of the
+// Hobby+Fluid-compute 300s maximum -- that raise only applies once a Function explicitly opts in.
+// POST /api/ask can involve a real Gemini call observed live (this session) taking 90s+, so without
+// this, the request is killed mid-flight with no error, just a silent re-invocation in the logs.
+// Mirrors apps/web/src/app/api/ask/route.ts's `export const maxDuration = 300` (Story 4.1). Must
+// be set on `module.exports.config` *after* module.exports is (re)assigned above, not before --
+// an earlier assignment here would just get overwritten.
+module.exports.config = { maxDuration: 300 };
