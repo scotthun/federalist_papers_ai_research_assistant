@@ -1,5 +1,13 @@
-import { BadRequestException, Body, Controller, HttpCode, Post } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  HttpCode,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import type { Answer } from '@federalist-research/shared';
+import { RateLimitGuard } from '../rate-limit/rate-limit.guard';
 import type { ConversationTurn } from './answer-prompt';
 import { AskService } from './ask.service';
 
@@ -100,8 +108,12 @@ export class AskController {
    */
   // A question-answering action, not a resource-creation one -- 200 (Nest's `@Post()` default is
   // 201) is the more accurate status for what this endpoint actually does.
+  // RateLimitGuard (spec-4-2-rate-limiting-upstash.md): bounds cost exposure on this one route --
+  // the only one in apps/api that calls a paid/metered AI provider. A no-op (no Redis call) when
+  // Upstash env vars are unset, the default local-dev state.
   @Post()
   @HttpCode(200)
+  @UseGuards(RateLimitGuard)
   async ask(@Body() body: AskRequestBody): Promise<Answer> {
     const question = typeof body?.question === 'string' ? body.question : '';
     const trimmedQuestion = question.trim();

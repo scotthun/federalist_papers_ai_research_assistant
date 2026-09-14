@@ -1,6 +1,9 @@
 import { BadRequestException } from '@nestjs/common';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { Test, TestingModule } from '@nestjs/testing';
 import type { Answer } from '@federalist-research/shared';
+import { RateLimitGuard } from '../rate-limit/rate-limit.guard';
+import { DAILY_RATE_LIMITER, PER_IP_RATE_LIMITER } from '../rate-limit/rate-limit.provider';
 import { AskController, coerceHistory } from './ask.controller';
 import { AskService } from './ask.service';
 
@@ -20,10 +23,29 @@ describe('AskController', () => {
 
     const app: TestingModule = await Test.createTestingModule({
       controllers: [AskController],
-      providers: [{ provide: AskService, useValue: service }],
+      providers: [
+        { provide: AskService, useValue: service },
+        // RateLimitGuard (spec-4-2-rate-limiting-upstash.md) is applied via @UseGuards on ask() --
+        // undefined limiters mirror "Upstash unset" (the default local-dev no-op state), needed
+        // here purely so Nest can resolve the guard's constructor, not exercised by any test in
+        // this file (guard enforcement itself is covered by rate-limit.guard.spec.ts).
+        RateLimitGuard,
+        { provide: PER_IP_RATE_LIMITER, useValue: undefined },
+        { provide: DAILY_RATE_LIMITER, useValue: undefined },
+      ],
     }).compile();
 
     controller = app.get<AskController>(AskController);
+  });
+
+  // spec-4-2-rate-limiting-upstash.md: proves RateLimitGuard is actually applied to ask() (not
+  // just present in the codebase, unused) -- reads Nest's own guard metadata rather than
+  // re-implementing the guard's enforcement logic here (covered separately in
+  // rate-limit.guard.spec.ts).
+  it('has RateLimitGuard applied to the ask() handler', () => {
+    const guards = Reflect.getMetadata(GUARDS_METADATA, AskController.prototype.ask);
+
+    expect(guards).toContain(RateLimitGuard);
   });
 
   it('delegates to AskService.ask with the question and returns its result', async () => {

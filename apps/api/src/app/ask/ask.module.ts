@@ -4,10 +4,15 @@ import {
   createGenerationProviderProvider,
   createPaperReferenceExtractorProvider,
 } from '../ai-provider.provider';
+import { RateLimitModule } from '../rate-limit/rate-limit.module';
 import { AskController } from './ask.controller';
 import { AskService } from './ask.service';
 
 @Module({
+  // RateLimitModule (spec-4-2-rate-limiting-upstash.md): exports RateLimitGuard, applied to
+  // AskController.ask() via @UseGuards -- bounds cost exposure on the one route that calls the
+  // paid/metered AI provider.
+  imports: [RateLimitModule],
   controllers: [AskController],
   // createEmbeddingProviderProvider() (shared with PapersModule) + createGenerationProviderProvider()
   // (see ai-provider.provider.ts's doc comments): AskService injects both -- EMBEDDING_PROVIDER for

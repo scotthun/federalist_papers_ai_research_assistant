@@ -5,6 +5,7 @@
 
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app/app.module';
 import { loadLocalEnv } from './load-local-env';
 
@@ -51,12 +52,17 @@ export function resolveCorsOrigin(
  * Vercel's Node runtime owns the request lifecycle for a Function, not `app.listen()`.
  */
 export async function createApp() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.setGlobalPrefix('api');
   const corsOrigin = resolveCorsOrigin(process.env);
   if (corsOrigin) {
     app.enableCors({ origin: corsOrigin });
   }
+  // Same code path resolves `request.ip` correctly behind Vercel's proxy in production and the
+  // local socket address in local dev -- no `isProd` branch (spec-4-2-rate-limiting-upstash.md,
+  // AD-5). Express trusts the immediate proxy hop's `X-Forwarded-For` header; in local dev there
+  // is no proxy, so `request.ip` still resolves to the direct socket address as before.
+  app.set('trust proxy', 1);
   return app;
 }
 

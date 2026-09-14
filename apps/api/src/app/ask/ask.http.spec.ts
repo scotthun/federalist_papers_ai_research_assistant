@@ -8,6 +8,8 @@ import {
   GENERATION_PROVIDER,
   PAPER_REFERENCE_EXTRACTOR,
 } from '../ai-provider.provider';
+import { RateLimitGuard } from '../rate-limit/rate-limit.guard';
+import { DAILY_RATE_LIMITER, PER_IP_RATE_LIMITER } from '../rate-limit/rate-limit.provider';
 import { AskController } from './ask.controller';
 import { AskService } from './ask.service';
 import { CLARIFY_THRESHOLD, CONFIDENT_THRESHOLD } from './answer-thresholds';
@@ -60,6 +62,12 @@ describe('POST /api/ask (HTTP wiring)', () => {
         { provide: EMBEDDING_PROVIDER, useValue: fakeEmbeddingProvider },
         { provide: GENERATION_PROVIDER, useValue: fakeGenerationProvider },
         { provide: PAPER_REFERENCE_EXTRACTOR, useValue: fakePaperReferenceExtractor },
+        // RateLimitGuard (spec-4-2-rate-limiting-upstash.md) is now applied to ask() -- both
+        // limiters undefined here mirrors "Upstash unset" (the default local-dev state), so the
+        // guard is a no-op and every existing assertion below is unaffected.
+        RateLimitGuard,
+        { provide: PER_IP_RATE_LIMITER, useValue: undefined },
+        { provide: DAILY_RATE_LIMITER, useValue: undefined },
       ],
     }).compile();
 
