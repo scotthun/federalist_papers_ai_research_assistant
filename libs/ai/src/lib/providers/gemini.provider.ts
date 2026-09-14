@@ -152,7 +152,12 @@ export class GeminiProvider implements EmbeddingProvider, GenerationProvider {
     // -- one model call per invocation" contract at runtime (the caller's own retry policy, e.g.
     // this story's citation-verification retry, is the only place a retry is allowed to happen).
     this.chatModel = new ChatGoogleGenerativeAI({
-      model: options.generationModel ?? DEFAULT_GENERATION_MODEL,
+      // `?.trim() || DEFAULT...` (not `??`) -- a blank/whitespace GEMINI_GENERATION_MODEL (e.g. an
+      // env var left present-but-empty on Vercel rather than removed entirely, confirmed live:
+      // GoogleGenerativeAIError "Must provide a model name") is `''`, not `undefined`/`null`, so
+      // `??` alone would pass it straight through. Same blank-treated-as-unset convention as
+      // `resolveCorsOrigin` (Story 4.1).
+      model: options.generationModel?.trim() || DEFAULT_GENERATION_MODEL,
       apiKey: options.apiKey,
       maxRetries: 0,
     });
