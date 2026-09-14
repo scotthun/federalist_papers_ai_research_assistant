@@ -30,7 +30,13 @@ export const API_FETCH_TIMEOUT_MS = 5_000;
 // and shown "couldn't reach the server" for a request that was actually still in flight. Raised
 // to give real headroom for a long confident-tier answer plus one retry, not just the short
 // single-citation case this value was originally sized against.
-export const ASK_FETCH_TIMEOUT_MS = 90_000;
+//
+// Raised again to 300s (Story 4.1, review finding): this route's own Vercel Function
+// `maxDuration` was separately raised to 300s specifically to survive slow Gemini calls (observed
+// live at 90-94s) once deployed -- leaving this constant at 90_000 would have self-aborted the
+// exact same slow calls before that 300s ceiling could ever matter, silently defeating the whole
+// point of raising it.
+export const ASK_FETCH_TIMEOUT_MS = 300_000;
 
 /**
  * Resolves apps/api's configured base URL, with any trailing slash(es) stripped so an

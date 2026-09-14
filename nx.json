@@ -13,7 +13,12 @@
       "!{projectRoot}/.eslintrc.json",
       "!{projectRoot}/eslint.config.mjs"
     ],
-    "sharedGlobals": []
+    "sharedGlobals": [
+      { "env": "DATABASE_URL" },
+      { "env": "GEMINI_API_KEY" },
+      { "env": "WEB_ORIGIN" },
+      { "env": "API_BASE_URL" }
+    ]
   },
   "plugins": [
     {

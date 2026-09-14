@@ -10,6 +10,10 @@ const UNREACHABLE_ERROR_BODY = {
   message: "We couldn't reach the Federalist Research server. Please try again shortly.",
 };
 
+// Raises this route's Vercel Function execution ceiling to the Hobby+Fluid-compute maximum, so
+// a slow Gemini call (observed live at 90s+) is never truncated mid-request (Story 4.1).
+export const maxDuration = 300;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
