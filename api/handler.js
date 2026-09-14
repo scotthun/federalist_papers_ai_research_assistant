@@ -1,21 +1,19 @@
-// Vercel serverless entrypoint (Story 4.1 deploy walkthrough). Any file under a top-level
-// `/api` directory is auto-detected as a Vercel Function regardless of framework preset -- unlike
-// the `.listen()`-detection mechanism, which empirically did not pick up NestJS's internal Express
-// adapter when tried against this Nx-built bundle.
+// Vercel serverless entrypoint (Story 4.1 deploy walkthrough).
 //
-// Named `[...path].js` (single bracket -- Vercel's own native Serverless Functions catch-all,
-// documented independently of any framework), not `index.js` or `[[...path]].js`. Two things
-// confirmed live against the deployed app:
-// - `api/index.js` only maps to the exact path `/api` and 404s on every subpath.
-// - `[[...path]].js` (double-bracket "optional catch-all") is really a Next.js App Router
-//   convention -- on this "Other"-preset, non-Next.js project it only matched `/api` itself and
-//   exactly one segment beneath it (`/api/papers`, `/api/ask`); a second segment
-//   (`/api/papers/5`, `/api/papers/search`) never reached the Function at all (a platform-level
-//   `X-Vercel-Error: NOT_FOUND`, not even Nest's own 404 JSON).
-// The single-bracket required catch-all matches every path *beneath* `/api` (one or more
-// segments) at any depth, forwarding the original URL unchanged so Nest's own router still does
-// the real routing. It does not match bare `/api` itself, which is fine -- apps/web never calls
-// that path directly.
+// Named plainly, not via any bracket convention -- three bracket-based approaches were each tried
+// and confirmed live to fail on this "Other"-preset, non-Next.js, custom-Build-Command project:
+// - `api/index.js` only maps to the exact path `/api`, 404s on every subpath.
+// - `api/[[...path]].js` (Next.js App Router's "optional catch-all") only matched `/api` itself
+//   and exactly one segment beneath it -- a second segment (`/api/papers/5`) never reached the
+//   Function at all (platform-level `X-Vercel-Error: NOT_FOUND`, not even Nest's own 404 JSON).
+// - `api/[...path].js` (Vercel's own documented native catch-all) behaved identically to the
+//   above, including after isolating the static Output Directory into its own `public/` folder --
+//   ruling out an Output-Directory-shadowing theory too.
+// Given all three bracket conventions failed the same way, this project's bracket-based
+// file-routing detection is unreliable full stop, independent of depth or output-dir config.
+// The robust alternative: a plain, single, unambiguous route (`/api/handler`, matching this
+// file's own name with zero inference), with every `/api/*` request funneled to it explicitly via
+// `vercel.json`'s `rewrites` instead of relying on any filename convention at all.
 //
 // Requires the Nx webpack build output directly (`dist/apps/api/main.js`, produced by the
 // project's Vercel Build Command: `npx nx build api`) rather than duplicating any application
