@@ -28,10 +28,31 @@ export function parsePort(
   return value;
 }
 
+/**
+ * `undefined` (local dev, `WEB_ORIGIN` unset, blank, or whitespace-only) means "don't call
+ * `enableCors` at all" -- a byte-for-byte no-op, never a permissive/reflect-origin default
+ * (Story 4.1's Boundaries & Constraints: "unset means no CORS call at all"). A literal `*` is
+ * also treated as unset rather than passed through -- `enableCors({ origin: '*' })` would open
+ * cross-origin access to every caller, exactly the permissive default this function's contract
+ * forbids, not "restrict to that one origin only" (AD-1). A defined, non-`*` value restricts
+ * cross-origin access to that one origin only.
+ */
+export function resolveCorsOrigin(
+  env: Record<string, string | undefined>,
+): string | undefined {
+  const trimmed = env.WEB_ORIGIN?.trim();
+  if (!trimmed || trimmed === '*') return undefined;
+  return trimmed;
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const globalPrefix = 'api';
   app.setGlobalPrefix(globalPrefix);
+  const corsOrigin = resolveCorsOrigin(process.env);
+  if (corsOrigin) {
+    app.enableCors({ origin: corsOrigin });
+  }
   // Default moved off 3000 (Story 1.3) -- identical to Next.js's own dev-server default, and
   // apps/web + apps/api now run concurrently for real cross-app HTTP calls. Still overridable
   // via PORT.

@@ -27,6 +27,10 @@ export function createDataSourceOptions(
     entities: databaseEntities,
     migrations: databaseMigrations,
     synchronize: false,
+    // Neon's PgBouncer already pools underneath -- a modest per-instance pool avoids stacking
+    // many small pools against the shared pooled endpoint under Fluid compute's concurrent
+    // warm-instance model (Story 4.1).
+    extra: { max: 5 },
   };
 }
 
