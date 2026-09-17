@@ -480,7 +480,11 @@ export function QuillPanel({
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
           placeholder="Ask a question…"
-          className="h-11 w-full rounded-md border border-quill-border-default bg-quill-surface-raised px-3 text-sm text-quill-ink-primary placeholder:text-quill-ink-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold"
+          // text-base (16px) below md, text-sm (14px) at md+ -- iOS Safari auto-zooms the whole
+          // page on focusing any input under 16px, forcing a manual pinch-zoom-out afterward
+          // (confirmed live on a 390px mobile viewport, the reported "scrunched, have to zoom
+          // out" bug). 16px on mobile avoids that; the desktop size is preserved unchanged.
+          className="h-11 w-full rounded-md border border-quill-border-default bg-quill-surface-raised px-3 text-base text-quill-ink-primary placeholder:text-quill-ink-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-quill-accent-gold md:text-sm"
         />
         <button
           type="submit"

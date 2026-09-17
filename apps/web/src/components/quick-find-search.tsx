@@ -35,7 +35,11 @@ export function QuickFindSearch() {
         value={term}
         onChange={handleChange}
         placeholder="Search by number, author, title, or keyword"
-        className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        // text-base (16px) below md, text-sm (14px) at md+ -- iOS Safari auto-zooms the whole
+        // page on focusing any input under 16px, forcing a manual pinch-zoom-out afterward
+        // (confirmed live on a 390px mobile viewport). 16px on mobile avoids that; the desktop
+        // size is preserved unchanged.
+        className="h-9 w-full rounded-md border border-border bg-background px-3 text-base shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:text-sm"
       />
       <Button type="submit">Search</Button>
     </form>
