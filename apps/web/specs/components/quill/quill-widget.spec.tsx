@@ -85,6 +85,167 @@ describe('QuillWidget', () => {
     expect(document.activeElement).toBe(input);
   });
 
+  // spec-mobile-keyboard-panel-clipping.md: body scroll lock removes the scrollable ancestor
+  // WebKit's own "scroll the focused input into view" refocus-scroll quirk exploits, addressing
+  // the iOS root cause of the reported clipping bug directly. jsdom defaults to `matchMedia`
+  // being undefined, so this simulates a mobile viewport by stubbing `window.matchMedia` to match
+  // the panel's own `(max-width: 767px)` query -- the same guard the panel itself uses to decide
+  // mobile vs. desktop behavior.
+  describe('body scroll lock (spec-mobile-keyboard-panel-clipping.md)', () => {
+    const originalMatchMedia = window.matchMedia;
+
+    function stubMatchMedia(matchesMobile: boolean) {
+      window.matchMedia = jest.fn().mockImplementation((query: string) => ({
+        matches: matchesMobile,
+        media: query,
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+      })) as unknown as typeof window.matchMedia;
+    }
+
+    afterEach(() => {
+      window.matchMedia = originalMatchMedia;
+      document.body.style.overflow = '';
+    });
+
+    it('locks body scroll on open and releases it on close, on a mobile viewport', async () => {
+      stubMatchMedia(true);
+      document.body.style.overflow = '';
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      expect(document.body.style.overflow).toBe('hidden');
+
+      // Closes via the panel's own collapse control (unmounts QuillPanel, same as
+      // quill-widget.tsx's conditional render) -- not a full test-harness `unmount()`, so this
+      // exercises the same "close" path a real user triggers.
+      fireEvent.click(screen.getByRole('button', { name: 'Collapse Ask the Archive panel' }));
+
+      expect(document.body.style.overflow).toBe('');
+    });
+
+    it('does not lock body scroll on a desktop viewport', async () => {
+      stubMatchMedia(false);
+      document.body.style.overflow = '';
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      expect(document.body.style.overflow).toBe('');
+    });
+
+    it('restores whatever overflow value was set before the panel opened, not always empty string', async () => {
+      stubMatchMedia(true);
+      document.body.style.overflow = 'scroll';
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+      expect(document.body.style.overflow).toBe('hidden');
+
+      // Closes via the panel's own collapse control, same as the other two tests in this describe
+      // block -- exercising the real user-facing close path rather than a raw test-harness
+      // `unmount()`, so all three tests here are consistent about which "close" they verify.
+      fireEvent.click(screen.getByRole('button', { name: 'Collapse Ask the Archive panel' }));
+
+      expect(document.body.style.overflow).toBe('scroll');
+    });
+
+    // The doc comment on quill-panel.tsx's `isMobile` media-query effect claims a resize across
+    // the breakpoint (e.g. a tablet rotation) re-evaluates rather than sticking with whichever mode
+    // was true on mount -- this test actually fires the stubbed `matchMedia` `change` event to
+    // confirm the `handleChange` listener really triggers that re-evaluation, rather than trusting
+    // the comment on faith.
+    it('re-evaluates on a matchMedia change event, not just at mount (e.g. a tablet rotation)', async () => {
+      const mockMediaQueryList = {
+        matches: false,
+        media: '(max-width: 767px)',
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+      };
+      window.matchMedia = jest
+        .fn()
+        .mockReturnValue(mockMediaQueryList) as unknown as typeof window.matchMedia;
+      document.body.style.overflow = '';
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      // Started desktop (matches: false) -- no scroll lock yet.
+      expect(document.body.style.overflow).toBe('');
+      expect(mockMediaQueryList.addEventListener).toHaveBeenCalledWith(
+        'change',
+        expect.any(Function),
+      );
+
+      const changeHandler = mockMediaQueryList.addEventListener.mock.calls[0][1] as (
+        event: MediaQueryListEvent,
+      ) => void;
+      act(() => {
+        changeHandler({ matches: true } as MediaQueryListEvent);
+      });
+
+      // The component re-evaluated to mobile mode purely from the change event, without any
+      // remount or new `Ask the Archive` click.
+      expect(document.body.style.overflow).toBe('hidden');
+    });
+  });
+
+  // spec-mobile-keyboard-panel-clipping.md: `useVisualViewportHeight` is called with no arguments
+  // inside quill-panel.tsx, so it always reads the real global `window.visualViewport` -- which
+  // jsdom (this suite's environment) does not implement at all. Every other test in this file
+  // therefore has `usesVisualViewportSizing` permanently `false`, so a regression in that branch
+  // (wrong CSS class, wrong style key, an inverted condition, or deleting the branch entirely)
+  // would ship with the rest of the suite green. This stubs `window.visualViewport` globally so the
+  // hook actually observes a value, exercising the branch for real.
+  describe('visualViewport-driven mobile sizing (spec-mobile-keyboard-panel-clipping.md)', () => {
+    const originalMatchMedia = window.matchMedia;
+    const hadVisualViewport = 'visualViewport' in window;
+    const originalVisualViewport = (window as unknown as { visualViewport?: unknown })
+      .visualViewport;
+
+    function stubMobileMatchMedia() {
+      window.matchMedia = jest.fn().mockImplementation((query: string) => ({
+        matches: true,
+        media: query,
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+      })) as unknown as typeof window.matchMedia;
+    }
+
+    afterEach(() => {
+      window.matchMedia = originalMatchMedia;
+      if (hadVisualViewport) {
+        Object.defineProperty(window, 'visualViewport', {
+          value: originalVisualViewport,
+          configurable: true,
+        });
+      } else {
+        delete (window as unknown as { visualViewport?: unknown }).visualViewport;
+      }
+    });
+
+    it("sizes the panel from window.visualViewport's height and drops inset-0 in favor of inset-x-0 top-0", async () => {
+      stubMobileMatchMedia();
+      Object.defineProperty(window, 'visualViewport', {
+        value: { height: 420, addEventListener: jest.fn(), removeEventListener: jest.fn() },
+        configurable: true,
+      });
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      const heading = screen.getByText('🪶 Ask the Archive');
+      const panel = heading.closest('header')?.parentElement as HTMLElement;
+      expect(panel).toBeTruthy();
+
+      expect(panel.style.height).toBe('420px');
+      expect(panel.classList.contains('inset-0')).toBe(false);
+      expect(panel.classList.contains('inset-x-0')).toBe(true);
+      expect(panel.classList.contains('top-0')).toBe(true);
+    });
+  });
+
   it('streams a confident-tier answer token-by-token with a trailing cursor and aria-live, then attaches citations only once done', async () => {
     mockAskFetchStream([
       { type: 'token', text: 'Ambition ' },
