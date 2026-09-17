@@ -117,3 +117,11 @@
 - source_spec: `docs/implementation/spec-4-1-deploy-vercel-neon.md`
   summary: No startup log line states whether CORS is enabled (and for which origin) or disabled -- an operator has to read source/env vars rather than the boot log to confirm production CORS config.
   evidence: Blind-hunter review finding; a nice observability improvement, not a defect. Revisit if a real production CORS misconfiguration incident ever makes this worth the extra log line.
+
+- source_spec: `docs/implementation/spec-mobile-keyboard-panel-clipping.md`
+  summary: `MOBILE_MEDIA_QUERY` (`(max-width: 767px)`) in `quill-panel.tsx` hardcodes Tailwind's `md` breakpoint with no single source of truth -- if the Tailwind config's `md` breakpoint is ever changed, this JS-side constant would silently drift out of sync with no test to catch it.
+  evidence: Blind-hunter review finding. Pre-existing pattern in this same file (the `md:` Tailwind classes are already hardcoded string literals with no JS-side constant), so this doesn't introduce a new class of risk, just extends an existing one to one more place. Revisit if this project ever introduces a shared breakpoint-constants module.
+
+- source_spec: `docs/implementation/spec-mobile-keyboard-panel-clipping.md`
+  summary: The mobile body-scroll lock (`document.body.style.overflow = 'hidden'`) has no accompanying scroll-position-preservation or `overscroll-behavior`/`-webkit-overflow-scrolling` handling -- a known secondary source of iOS Safari layout jank/scroll-jump when locking body scroll.
+  evidence: Blind-hunter review finding. Out of this bug's literal scope (fixing header clipping, not general iOS scroll-lock polish) and not a regression from today's behavior (no scroll lock existed before this fix at all). Revisit if a follow-up report specifically describes scroll-jump/jank when the chat panel opens on mobile.

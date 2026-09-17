@@ -16,6 +16,13 @@ import {
 import { cn } from '@/lib/utils';
 import { truncateCitationSnippet } from '@/lib/citation-snippet';
 import { CHAT_HISTORY_SESSION_KEY, type QuillMessage } from './quill-widget';
+import { useVisualViewportHeight } from './use-visual-viewport-height';
+
+/** Matches Tailwind's default `md` breakpoint (768px) that `quill-panel`'s own `md:` classes key
+ *  off of -- the mobile-only sizing/scroll-lock below must agree with exactly the same threshold,
+ *  or there'd be a range of widths where both the inline mobile height and the desktop `md:`
+ *  classes fight each other. */
+const MOBILE_MEDIA_QUERY = '(max-width: 767px)';
 
 type PanelProps = {
   messages: QuillMessage[];
@@ -273,6 +280,61 @@ export function QuillPanel({
     };
   }, []);
 
+  // spec-mobile-keyboard-panel-clipping.md: mirrors the same `md:` breakpoint the outer panel's
+  // own Tailwind classes key off of, tracked as state (not read ad hoc) so both the inline mobile
+  // height below and the scroll-lock effect stay in sync with the same viewport, and so a resize
+  // across the breakpoint (e.g. a tablet rotation) re-evaluates rather than sticking with
+  // whichever mode was true on mount. `false` on the server/initial render -- matches desktop's
+  // existing (unaffected) behavior until the client confirms otherwise.
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const mediaQueryList = window.matchMedia(MOBILE_MEDIA_QUERY);
+    setIsMobile(mediaQueryList.matches);
+    function handleChange(event: MediaQueryListEvent) {
+      setIsMobile(event.matches);
+    }
+    // Safari < 14.1 only implements the legacy `addListener`/`removeListener` pair on
+    // `MediaQueryList` -- `addEventListener` isn't present at all there, so calling it
+    // unconditionally would throw a `TypeError` at mount and crash the whole panel. Feature-detect
+    // and fall back to the legacy API rather than assuming the modern one exists.
+    if (typeof mediaQueryList.addEventListener === 'function') {
+      mediaQueryList.addEventListener('change', handleChange);
+      return () => {
+        mediaQueryList.removeEventListener('change', handleChange);
+      };
+    }
+    mediaQueryList.addListener(handleChange);
+    return () => {
+      mediaQueryList.removeListener(handleChange);
+    };
+  }, []);
+
+  // `undefined` whenever `visualViewport` is unsupported (jsdom, or an old/unusual browser) -- the
+  // render below falls back to the pre-existing `inset-0` sizing in that case (Boundaries: "no
+  // worse than the current state").
+  const visualViewportHeight = useVisualViewportHeight();
+
+  // Body-scroll lock (this spec's Approach): removes the scrollable ancestor WebKit's own
+  // "scroll the focused input into view" refocus quirk exploits, addressing the iOS-specific root
+  // cause directly rather than only resizing around its symptom. Mobile-only (matches the panel's
+  // own mobile/desktop split) and mount/unmount-scoped -- the previous inline value is restored on
+  // cleanup rather than always clearing to `''`, so this never clobbers some other feature's own
+  // scroll-lock if one is ever layered on top later, and it can never leak the locked state onto
+  // the rest of the app past this component's own mount, per this spec's Boundaries.
+  useEffect(() => {
+    if (!isMobile) {
+      return;
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isMobile]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     // Belt-and-suspenders against a second in-flight request: the send control is already
@@ -395,19 +457,36 @@ export function QuillPanel({
     }
   }
 
+  // spec-mobile-keyboard-panel-clipping.md: only once we're confirmed mobile *and*
+  // `visualViewport` is actually supported do we take over sizing/positioning with an explicit
+  // inline height -- everything else (desktop, or mobile on a browser lacking `visualViewport`)
+  // keeps the original `inset-0` behavior untouched, so an unsupported browser is never worse off
+  // than before this fix (Boundaries).
+  // Also requires a *positive* height, not merely a defined one: iOS can momentarily report
+  // `visualViewport.height` as `0` during certain viewport-transition frames, and `0 !== undefined`
+  // would otherwise apply an inline `height: 0` style and visually collapse the panel for that
+  // frame instead of falling back to the existing `inset-0` sizing.
+  const usesVisualViewportSizing = isMobile && !!visualViewportHeight;
+
   return (
     <div
       className={cn(
         // Mobile (< md): full-screen sheet, square corners, no dog-ear (DESIGN.md's "Chat
         // panel": "it now owns the whole viewport"). Desktop (>= md): 340px popup docked
         // bottom-right with the dog-eared asymmetric corner.
-        'fixed inset-0 z-50 flex flex-col bg-quill-surface-panel font-serif shadow-[0_8px_30px_rgba(58,47,36,0.35)]',
+        'fixed z-50 flex flex-col bg-quill-surface-panel font-serif shadow-[0_8px_30px_rgba(58,47,36,0.35)]',
+        // With `visualViewport` support on mobile, height is driven by the inline style below --
+        // `bottom-0` is deliberately dropped (only `inset-x-0 top-0`) so the explicit height isn't
+        // overconstrained against it. Without support (or on desktop, overridden by `md:` below),
+        // `inset-0` reproduces exactly today's behavior.
+        usesVisualViewportSizing ? 'inset-x-0 top-0' : 'inset-0',
         'md:inset-auto md:bottom-4 md:right-4 md:h-[480px] md:w-[340px] md:border md:border-quill-accent-gold',
         // Dog-eared asymmetric corner (DESIGN.md's "Shapes"), desktop only -- per-corner
         // arbitrary values rather than the `quill-panel-shape` utility class so the `md:` variant
         // applies cleanly through Tailwind's built-in corner-radius utilities.
         'md:rounded-tl-[10px] md:rounded-tr-[10px] md:rounded-br-[4px] md:rounded-bl-[10px]',
       )}
+      style={usesVisualViewportSizing ? { height: visualViewportHeight } : undefined}
     >
       <header className="flex items-center justify-between bg-quill-inverse-surface px-4 py-3 text-quill-inverse-on-surface">
         <h2 className="text-base">🪶 Ask the Archive</h2>
