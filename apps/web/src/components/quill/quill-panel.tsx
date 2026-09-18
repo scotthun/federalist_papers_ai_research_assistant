@@ -24,6 +24,17 @@ import { useVisualViewportHeight } from './use-visual-viewport-height';
  *  classes fight each other. */
 const MOBILE_MEDIA_QUERY = '(max-width: 767px)';
 
+/** Single shared "is this a mobile viewport right now" check (the autofocus effect and the
+ *  `isMobile` state effect below both need this exact same synchronous read) -- kept in one place
+ *  so there's never a second, silently-drifting definition of "mobile" in this file. */
+function isMobileViewport(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia(MOBILE_MEDIA_QUERY).matches
+  );
+}
+
 type PanelProps = {
   messages: QuillMessage[];
   setMessages: Dispatch<SetStateAction<QuillMessage[]>>;
@@ -264,10 +275,36 @@ export function QuillPanel({
   );
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // Focus moves into the question input every time the panel opens (this story's AC) -- this
-  // component only ever mounts while the panel is open (quill-widget.tsx unmounts it on
-  // collapse), so a mount-time effect is exactly "on open".
+  // spec-mobile-keyboard-panel-clipping.md: mirrors the same `md:` breakpoint the outer panel's
+  // own Tailwind classes key off of, tracked as state (not read ad hoc) so both the inline mobile
+  // height below and the scroll-lock effect stay in sync with the same viewport, and so a resize
+  // across the breakpoint (e.g. a tablet rotation) re-evaluates rather than sticking with
+  // whichever mode was true on mount. `false` on the server/initial render -- matches desktop's
+  // existing (unaffected) behavior until the client confirms otherwise. Declared above the
+  // autofocus effect below (spec-mobile-keyboard-panel-offset.md) since that effect now needs
+  // mobile-vs-desktop info.
+  const [isMobile, setIsMobile] = useState(false);
+
+  // Focus moves into the question input every time the panel opens on desktop (this story's AC,
+  // narrowed by spec-mobile-keyboard-panel-offset.md to desktop only) -- this component only ever
+  // mounts while the panel is open (quill-widget.tsx unmounts it on collapse), so a mount-time
+  // effect is exactly "on open". On mobile, auto-focusing immediately opens the keyboard before
+  // the panel has ever settled into place, which is exactly the keyboard-race this spec's fix
+  // closes; mobile instead uses tap-to-focus (the dominant mobile-web chat convention), so this
+  // effect is a no-op there.
+  //
+  // Deliberately does NOT gate on the `isMobile` state above: that state starts `false` on every
+  // mount (server-render-safe) and only flips to its real value once the matchMedia effect below
+  // runs and commits a re-render -- since all of a component's effects for one commit fire against
+  // that *same* completed render's closures, this effect would otherwise always see the stale,
+  // pre-detection `false` on the very first mount and call `.focus()` regardless of the real
+  // device, no matter which effect is declared first in the file (confirmed via a failing test
+  // during this fix). Checking the media query directly, synchronously, inside this effect's own
+  // body sidesteps that one-commit lag entirely.
   useEffect(() => {
+    if (isMobileViewport()) {
+      return;
+    }
     inputRef.current?.focus();
   }, []);
 
@@ -280,19 +317,12 @@ export function QuillPanel({
     };
   }, []);
 
-  // spec-mobile-keyboard-panel-clipping.md: mirrors the same `md:` breakpoint the outer panel's
-  // own Tailwind classes key off of, tracked as state (not read ad hoc) so both the inline mobile
-  // height below and the scroll-lock effect stay in sync with the same viewport, and so a resize
-  // across the breakpoint (e.g. a tablet rotation) re-evaluates rather than sticking with
-  // whichever mode was true on mount. `false` on the server/initial render -- matches desktop's
-  // existing (unaffected) behavior until the client confirms otherwise.
-  const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
       return;
     }
     const mediaQueryList = window.matchMedia(MOBILE_MEDIA_QUERY);
-    setIsMobile(mediaQueryList.matches);
+    setIsMobile(isMobileViewport());
     function handleChange(event: MediaQueryListEvent) {
       setIsMobile(event.matches);
     }
@@ -314,8 +344,10 @@ export function QuillPanel({
 
   // `undefined` whenever `visualViewport` is unsupported (jsdom, or an old/unusual browser) -- the
   // render below falls back to the pre-existing `inset-0` sizing in that case (Boundaries: "no
-  // worse than the current state").
-  const visualViewportHeight = useVisualViewportHeight();
+  // worse than the current state"). Extended by spec-mobile-keyboard-panel-offset.md to also carry
+  // `offsetTop`: `height` alone only fixes sizing, not the panel's actual on-screen position once
+  // iOS scrolls the layout viewport to reveal a focused input.
+  const visualViewportMetrics = useVisualViewportHeight();
 
   // Body-scroll lock (this spec's Approach): removes the scrollable ancestor WebKit's own
   // "scroll the focused input into view" refocus quirk exploits, addressing the iOS-specific root
@@ -466,7 +498,7 @@ export function QuillPanel({
   // `visualViewport.height` as `0` during certain viewport-transition frames, and `0 !== undefined`
   // would otherwise apply an inline `height: 0` style and visually collapse the panel for that
   // frame instead of falling back to the existing `inset-0` sizing.
-  const usesVisualViewportSizing = isMobile && !!visualViewportHeight;
+  const usesVisualViewportSizing = isMobile && !!visualViewportMetrics?.height;
 
   return (
     <div
@@ -475,18 +507,24 @@ export function QuillPanel({
         // panel": "it now owns the whole viewport"). Desktop (>= md): 340px popup docked
         // bottom-right with the dog-eared asymmetric corner.
         'fixed z-50 flex flex-col bg-quill-surface-panel font-serif shadow-[0_8px_30px_rgba(58,47,36,0.35)]',
-        // With `visualViewport` support on mobile, height is driven by the inline style below --
-        // `bottom-0` is deliberately dropped (only `inset-x-0 top-0`) so the explicit height isn't
-        // overconstrained against it. Without support (or on desktop, overridden by `md:` below),
-        // `inset-0` reproduces exactly today's behavior.
-        usesVisualViewportSizing ? 'inset-x-0 top-0' : 'inset-0',
+        // With `visualViewport` support on mobile, height AND top are both driven by the inline
+        // style below (spec-mobile-keyboard-panel-offset.md: a static `top-0` doesn't track the
+        // visual viewport's origin shifting down once the keyboard forces the layout viewport to
+        // scroll) -- `bottom-0` is deliberately dropped (only `inset-x-0`) so the explicit
+        // height/top aren't overconstrained against it. Without support (or on desktop, overridden
+        // by `md:` below), `inset-0` reproduces exactly today's behavior.
+        usesVisualViewportSizing ? 'inset-x-0' : 'inset-0',
         'md:inset-auto md:bottom-4 md:right-4 md:h-[480px] md:w-[340px] md:border md:border-quill-accent-gold',
         // Dog-eared asymmetric corner (DESIGN.md's "Shapes"), desktop only -- per-corner
         // arbitrary values rather than the `quill-panel-shape` utility class so the `md:` variant
         // applies cleanly through Tailwind's built-in corner-radius utilities.
         'md:rounded-tl-[10px] md:rounded-tr-[10px] md:rounded-br-[4px] md:rounded-bl-[10px]',
       )}
-      style={usesVisualViewportSizing ? { height: visualViewportHeight } : undefined}
+      style={
+        usesVisualViewportSizing
+          ? { height: visualViewportMetrics.height, top: visualViewportMetrics.offsetTop }
+          : undefined
+      }
     >
       <header className="flex items-center justify-between bg-quill-inverse-surface px-4 py-3 text-quill-inverse-on-surface">
         <h2 className="text-base">🪶 Ask the Archive</h2>

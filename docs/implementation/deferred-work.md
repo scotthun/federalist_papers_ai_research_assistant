@@ -125,3 +125,7 @@
 - source_spec: `docs/implementation/spec-mobile-keyboard-panel-clipping.md`
   summary: The mobile body-scroll lock (`document.body.style.overflow = 'hidden'`) has no accompanying scroll-position-preservation or `overscroll-behavior`/`-webkit-overflow-scrolling` handling -- a known secondary source of iOS Safari layout jank/scroll-jump when locking body scroll.
   evidence: Blind-hunter review finding. Out of this bug's literal scope (fixing header clipping, not general iOS scroll-lock polish) and not a regression from today's behavior (no scroll lock existed before this fix at all). Revisit if a follow-up report specifically describes scroll-jump/jank when the chat panel opens on mobile.
+
+- source_spec: `docs/implementation/spec-mobile-keyboard-panel-offset.md`
+  summary: `useVisualViewportHeight`'s test coverage doesn't exercise every event/property cross-combination -- `offsetTop` changing via a `resize` event and `height` changing via a `scroll` event aren't independently tested (only `height`-via-`resize` and `offsetTop`-via-`scroll` are).
+  evidence: Blind-hunter review finding. Low marginal value: both events call the exact same shared `handleViewportChange` function, which reads both properties symmetrically every time -- already covered from multiple angles by the existing tests. Revisit only if the handler's symmetry is ever broken (e.g. two separate handlers added for resize vs. scroll).
