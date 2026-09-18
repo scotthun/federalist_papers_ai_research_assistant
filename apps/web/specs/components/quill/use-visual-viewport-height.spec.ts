@@ -9,16 +9,18 @@ import { useVisualViewportHeight } from '../../../src/components/quill/use-visua
  */
 type StubVisualViewport = {
   height: number;
+  offsetTop: number;
   listeners: Record<string, Array<() => void>>;
   addEventListener: (type: string, listener: () => void) => void;
   removeEventListener: (type: string, listener: () => void) => void;
   fire: (type: string) => void;
 };
 
-function createStubVisualViewport(initialHeight: number): StubVisualViewport {
+function createStubVisualViewport(initialHeight: number, initialOffsetTop = 0): StubVisualViewport {
   const listeners: Record<string, Array<() => void>> = { resize: [], scroll: [] };
   return {
     height: initialHeight,
+    offsetTop: initialOffsetTop,
     listeners,
     addEventListener(type, listener) {
       listeners[type]?.push(listener);
@@ -47,13 +49,13 @@ describe('useVisualViewportHeight', () => {
     expect(result.current).toBeUndefined();
   });
 
-  it('returns the current visualViewport height when supported', () => {
-    const visualViewport = createStubVisualViewport(600);
+  it('returns the current visualViewport height and offsetTop when supported', () => {
+    const visualViewport = createStubVisualViewport(600, 0);
     const stubWindow = createStubWindow(visualViewport);
 
     const { result } = renderHook(() => useVisualViewportHeight(stubWindow));
 
-    expect(result.current).toBe(600);
+    expect(result.current).toEqual({ height: 600, offsetTop: 0 });
   });
 
   it('updates the returned height when a resize event fires (e.g. the on-screen keyboard opens)', () => {
@@ -61,14 +63,14 @@ describe('useVisualViewportHeight', () => {
     const stubWindow = createStubWindow(visualViewport);
 
     const { result } = renderHook(() => useVisualViewportHeight(stubWindow));
-    expect(result.current).toBe(844);
+    expect(result.current).toEqual({ height: 844, offsetTop: 0 });
 
     act(() => {
       visualViewport.height = 400;
       visualViewport.fire('resize');
     });
 
-    expect(result.current).toBe(400);
+    expect(result.current).toEqual({ height: 400, offsetTop: 0 });
   });
 
   it('updates the returned height when a scroll event fires', () => {
@@ -82,7 +84,31 @@ describe('useVisualViewportHeight', () => {
       visualViewport.fire('scroll');
     });
 
-    expect(result.current).toBe(500);
+    expect(result.current).toEqual({ height: 500, offsetTop: 0 });
+  });
+
+  it('updates the returned offsetTop independently on a scroll event (e.g. iOS scrolling the layout viewport to reveal a focused input), distinct from a resize-driven height change', () => {
+    const visualViewport = createStubVisualViewport(844, 0);
+    const stubWindow = createStubWindow(visualViewport);
+
+    const { result } = renderHook(() => useVisualViewportHeight(stubWindow));
+    expect(result.current).toEqual({ height: 844, offsetTop: 0 });
+
+    // Height shrinks via a resize event (keyboard opening)...
+    act(() => {
+      visualViewport.height = 400;
+      visualViewport.fire('resize');
+    });
+    expect(result.current).toEqual({ height: 400, offsetTop: 0 });
+
+    // ...then the visual viewport's origin shifts down via a separate scroll event, with height
+    // unchanged -- the two properties must be tracked independently, not conflated into a single
+    // "resize implies both changed" assumption.
+    act(() => {
+      visualViewport.offsetTop = 120;
+      visualViewport.fire('scroll');
+    });
+    expect(result.current).toEqual({ height: 400, offsetTop: 120 });
   });
 
   it('cleans up its resize/scroll listeners on unmount', () => {

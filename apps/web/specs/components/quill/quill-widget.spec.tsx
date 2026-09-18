@@ -78,7 +78,7 @@ describe('QuillWidget', () => {
     expect(readEvents).toEqual(events);
   });
 
-  it('moves focus into the question input when the panel opens', async () => {
+  it('moves focus into the question input when the panel opens on desktop', async () => {
     await openPanel();
 
     const input = screen.getByLabelText('Ask a question about the Federalist Papers');
@@ -225,10 +225,15 @@ describe('QuillWidget', () => {
       }
     });
 
-    it("sizes the panel from window.visualViewport's height and drops inset-0 in favor of inset-x-0 top-0", async () => {
+    it("sizes the panel from window.visualViewport's height and drops inset-0 in favor of inset-x-0", async () => {
       stubMobileMatchMedia();
       Object.defineProperty(window, 'visualViewport', {
-        value: { height: 420, addEventListener: jest.fn(), removeEventListener: jest.fn() },
+        value: {
+          height: 420,
+          offsetTop: 0,
+          addEventListener: jest.fn(),
+          removeEventListener: jest.fn(),
+        },
         configurable: true,
       });
 
@@ -240,9 +245,86 @@ describe('QuillWidget', () => {
       expect(panel).toBeTruthy();
 
       expect(panel.style.height).toBe('420px');
+      expect(panel.style.top).toBe('0px');
       expect(panel.classList.contains('inset-0')).toBe(false);
       expect(panel.classList.contains('inset-x-0')).toBe(true);
-      expect(panel.classList.contains('top-0')).toBe(true);
+      // spec-mobile-keyboard-panel-offset.md: `top` is now driven by the inline style (asserted
+      // above) tracking `visualViewport.offsetTop`, not a static Tailwind class -- a fixed
+      // `top: 0` wouldn't track the visual viewport's origin shifting down once the keyboard opens.
+      expect(panel.classList.contains('top-0')).toBe(false);
+    });
+
+    // spec-mobile-keyboard-panel-offset.md: the prior fix tracked height alone, which left the
+    // panel's static `top: 0` unable to follow iOS scrolling the layout viewport to reveal a
+    // focused input -- this asserts the panel's inline `top` tracks a non-zero `offsetTop`
+    // directly, the actual gap that spec closed.
+    it("positions the panel's top from window.visualViewport's offsetTop (simulating the keyboard-open scroll shift)", async () => {
+      stubMobileMatchMedia();
+      Object.defineProperty(window, 'visualViewport', {
+        value: {
+          height: 300,
+          offsetTop: 140,
+          addEventListener: jest.fn(),
+          removeEventListener: jest.fn(),
+        },
+        configurable: true,
+      });
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      const heading = screen.getByText('🪶 Ask the Archive');
+      const panel = heading.closest('header')?.parentElement as HTMLElement;
+
+      expect(panel.style.height).toBe('300px');
+      expect(panel.style.top).toBe('140px');
+    });
+
+    // spec-mobile-keyboard-panel-offset.md: `usesVisualViewportSizing` must require `isMobile`,
+    // not merely a defined `visualViewport.offsetTop` -- otherwise a desktop browser that happens
+    // to implement the Visual Viewport API (or reports a stale non-zero offsetTop from some other
+    // page state) would incorrectly get an inline `top` style even though desktop never uses this
+    // sizing path at all (it's governed entirely by the `md:` Tailwind classes).
+    it("ignores window.visualViewport's offsetTop on a desktop viewport", async () => {
+      window.matchMedia = jest.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+      })) as unknown as typeof window.matchMedia;
+      Object.defineProperty(window, 'visualViewport', {
+        value: {
+          height: 600,
+          offsetTop: 140,
+          addEventListener: jest.fn(),
+          removeEventListener: jest.fn(),
+        },
+        configurable: true,
+      });
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      const heading = screen.getByText('🪶 Ask the Archive');
+      const panel = heading.closest('header')?.parentElement as HTMLElement;
+
+      expect(panel.style.top).not.toBe('140px');
+      expect(panel.style.top).toBe('');
+      expect(panel.classList.contains('inset-0')).toBe(true);
+    });
+
+    // spec-mobile-keyboard-panel-offset.md: product decision this session -- mobile switches to
+    // tap-to-focus (the dominant mobile-web chat convention) specifically to avoid the
+    // keyboard-race this whole spec addresses; desktop's existing auto-focus is unaffected
+    // (asserted separately above).
+    it('does not auto-focus the question input when the panel opens on a mobile viewport', async () => {
+      stubMobileMatchMedia();
+
+      render(<QuillWidget />);
+      fireEvent.click(screen.getByRole('button', { name: 'Ask the Archive' }));
+
+      const input = screen.getByLabelText('Ask a question about the Federalist Papers');
+      expect(document.activeElement).not.toBe(input);
     });
   });
 
